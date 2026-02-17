@@ -45,7 +45,6 @@ class RAGIndexer:
         "node_modules",
         ".git",
         "__pycache__",
-        ".venv",
         "venv",
         ".next",
         "dist",

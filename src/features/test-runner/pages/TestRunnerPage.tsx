@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef, Suspense, lazy } from 'react'
 import {
   Card,
   CardContent,
@@ -12,6 +12,13 @@ import { Progress } from '@/components/ui/progress'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   Play,
   Square,
   RotateCcw,
@@ -22,12 +29,31 @@ import {
   Server,
   Database,
   Wifi,
+  Image,
+  Globe,
+  Code2,
+  Loader2,
+  ChevronRight,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useAppStore } from '@/stores/app-store'
+import { apiClient, type TestResultItem, type NetworkRequest } from '@/services/api-client'
 
+// Lazy-load Monaco to avoid crashing if not installed yet
+const MonacoEditor = lazy(() =>
+  import('@monaco-editor/react').then((m) => ({ default: m.default })).catch(() => ({
+    default: () => (
+      <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
+        Monaco not installed — run <code className="mx-1 bg-muted px-1 rounded">npm install</code>
+      </div>
+    ),
+  }))
+)
+
+// ── Types ─────────────────────────────────────────────────────────────────
 type TestStatus = 'idle' | 'running' | 'passed' | 'failed'
 
-interface TestLayer {
+interface LayerStat {
   id: string
   name: string
   icon: React.ElementType
@@ -37,84 +63,218 @@ interface TestLayer {
   failed: number
 }
 
-const testLayers: TestLayer[] = [
-  { id: 'frontend', name: 'Frontend', icon: Monitor, status: 'idle', tests: 24, passed: 0, failed: 0 },
-  { id: 'backend', name: 'Backend', icon: Server, status: 'idle', tests: 36, passed: 0, failed: 0 },
-  { id: 'database', name: 'Database', icon: Database, status: 'idle', tests: 12, passed: 0, failed: 0 },
-  { id: 'infrastructure', name: 'Infrastructure', icon: Wifi, status: 'idle', tests: 8, passed: 0, failed: 0 },
-]
+interface LogEntry {
+  time: string
+  level: 'info' | 'success' | 'error' | 'warn'
+  message: string
+}
 
-const mockLogs = [
-  { time: '14:30:01', level: 'info', message: 'Starting test run...' },
-  { time: '14:30:02', level: 'info', message: 'Initializing Playwright browser' },
-  { time: '14:30:03', level: 'info', message: 'Running frontend tests...' },
-  { time: '14:30:05', level: 'success', message: 'Test: Login flow - PASSED' },
-  { time: '14:30:08', level: 'success', message: 'Test: Navigation - PASSED' },
-  { time: '14:30:12', level: 'error', message: 'Test: Form submission - FAILED' },
-  { time: '14:30:12', level: 'error', message: '  Error: Element not found: #submit-btn' },
-]
+const STATUS_COLORS: Record<string, string> = {
+  passed: 'text-green-600',
+  failed: 'text-red-500',
+  error: 'text-red-500',
+  skipped: 'text-yellow-500',
+  running: 'text-blue-500',
+}
 
+// ── Default editor content ─────────────────────────────────────────────────
+const EDITOR_TEMPLATE = `import { test, expect } from '@playwright/test'
+
+test.describe('My Test Suite', () => {
+  test('should load the home page', async ({ page }) => {
+    await page.goto('http://localhost:3000')
+    await expect(page).toHaveTitle(/Home/)
+  })
+
+  test('should display the navigation', async ({ page }) => {
+    await page.goto('http://localhost:3000')
+    const nav = page.locator('nav')
+    await expect(nav).toBeVisible()
+  })
+})
+`
+
+// ── Component ──────────────────────────────────────────────────────────────
 export function TestRunnerPage() {
+  const { projects, selectedProjectId } = useAppStore()
+
+  const [activeProjectId, setActiveProjectId] = useState<string>(
+    selectedProjectId || projects[0]?.id || ''
+  )
+  const [activeRunId, setActiveRunId] = useState<string | null>(null)
   const [isRunning, setIsRunning] = useState(false)
   const [progress, setProgress] = useState(0)
-  const [selectedLayer, setSelectedLayer] = useState<string | null>(null)
+  const [logs, setLogs] = useState<LogEntry[]>([])
+  const [results, setResults] = useState<TestResultItem[]>([])
+  const [selectedResult, setSelectedResult] = useState<TestResultItem | null>(null)
+  const [editorCode, setEditorCode] = useState(EDITOR_TEMPLATE)
+  const [theme] = useState<'vs-dark' | 'light'>('vs-dark')
+  const logsEndRef = useRef<HTMLDivElement>(null)
+  const pollRef = useRef<number | null>(null)
 
-  const handleStart = () => {
-    setIsRunning(true)
-    setProgress(0)
-    // Simulate progress
-    const interval = setInterval(() => {
-      setProgress(prev => {
-        if (prev >= 100) {
-          clearInterval(interval)
-          setIsRunning(false)
-          return 100
-        }
-        return prev + 5
-      })
-    }, 500)
+  // Auto-scroll logs
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [logs])
+
+  // Layer summary derived from results
+  const layerStats: LayerStat[] = [
+    { id: 'frontend', name: 'Frontend', icon: Monitor },
+    { id: 'backend', name: 'Backend', icon: Server },
+    { id: 'database', name: 'Database', icon: Database },
+    { id: 'infrastructure', name: 'Infrastructure', icon: Wifi },
+  ].map((l) => {
+    const layerResults = results.filter((r) => r.test_layer === l.id)
+    const passed = layerResults.filter((r) => r.status === 'passed').length
+    const failed = layerResults.filter((r) =>
+      r.status === 'failed' || r.status === 'error'
+    ).length
+    const status: TestStatus =
+      layerResults.length === 0
+        ? 'idle'
+        : isRunning
+          ? 'running'
+          : failed > 0
+            ? 'failed'
+            : 'passed'
+
+    return { ...l, status, tests: layerResults.length, passed, failed }
+  })
+
+  const addLog = (level: LogEntry['level'], message: string) => {
+    const time = new Date().toLocaleTimeString('en-US', { hour12: false })
+    setLogs((prev) => [...prev, { time, level, message }])
   }
 
-  const handleStop = () => {
+  const pollResults = async (projectId: string, runId: string) => {
+    try {
+      const items = await apiClient.getTestRunResults(projectId, runId)
+      setResults(items)
+      const run = await apiClient.getTestRun(projectId, runId)
+      const pct =
+        run.status === 'passed' || run.status === 'failed'
+          ? 100
+          : run.results
+            ? Math.round(((run.results.passed + run.results.failed) / (run.results.total || 1)) * 100)
+            : progress
+
+      setProgress(pct)
+
+      if (run.status === 'passed' || run.status === 'failed') {
+        setIsRunning(false)
+        if (pollRef.current) clearInterval(pollRef.current)
+        addLog(run.status === 'passed' ? 'success' : 'error', `Run completed — status: ${run.status}`)
+      }
+    } catch {
+      // Ignore polling errors
+    }
+  }
+
+  const handleStart = async () => {
+    if (!activeProjectId) return
+    setIsRunning(true)
+    setProgress(0)
+    setResults([])
+    setSelectedResult(null)
+    setLogs([])
+
+    addLog('info', 'Starting test run…')
+    addLog('info', 'Initializing Playwright browser')
+
+    try {
+      const run = await apiClient.startTestRun(activeProjectId)
+      setActiveRunId(run.id)
+      addLog('info', `Test run created: ${run.id}`)
+
+      pollRef.current = window.setInterval(() => {
+        pollResults(activeProjectId, run.id)
+      }, 2000)
+    } catch (err: unknown) {
+      addLog('error', `Failed to start run: ${String(err)}`)
+      setIsRunning(false)
+    }
+  }
+
+  const handleStop = async () => {
+    if (!activeProjectId || !activeRunId) return
+    if (pollRef.current) clearInterval(pollRef.current)
+    try {
+      await apiClient.stopTestRun(activeProjectId, activeRunId)
+    } catch {/* ignore */}
     setIsRunning(false)
+    addLog('warn', 'Test run stopped by user')
+  }
+
+  // Collect all screenshots and network requests from results
+  const allScreenshots = results.filter((r) => r.screenshot_path)
+  const allNetworkRequests: (NetworkRequest & { test_name: string })[] = results.flatMap((r) =>
+    (r.metadata?.network_requests ?? []).map((req) => ({ ...req, test_name: r.test_name }))
+  )
+
+  const backendUrl = useAppStore.getState().backendUrl || 'http://localhost:8000'
+
+  const screenshotUrl = (path: string) => {
+    const filename = path.split('/').pop() ?? path
+    return `${backendUrl}/screenshots/${filename}`
   }
 
   return (
     <div className="space-y-6">
-      {/* Header */}
+      {/* ── Header ── */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">Test Runner</h1>
-          <p className="text-muted-foreground">
-            Execute and monitor your E2E test suite
-          </p>
+          <p className="text-muted-foreground">Execute and monitor your E2E test suite</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          {/* Project selector */}
+          {projects.length > 0 && (
+            <Select value={activeProjectId} onValueChange={setActiveProjectId}>
+              <SelectTrigger className="w-48">
+                <SelectValue placeholder="Select project" />
+              </SelectTrigger>
+              <SelectContent>
+                {projects.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+
           {isRunning ? (
             <Button variant="destructive" onClick={handleStop}>
               <Square className="mr-2 h-4 w-4" />
               Stop
             </Button>
           ) : (
-            <Button onClick={handleStart}>
+            <Button onClick={handleStart} disabled={!activeProjectId}>
               <Play className="mr-2 h-4 w-4" />
               Run All Tests
             </Button>
           )}
-          <Button variant="outline" disabled={isRunning}>
+          <Button
+            variant="outline"
+            disabled={isRunning || results.length === 0}
+            onClick={handleStart}
+          >
             <RotateCcw className="mr-2 h-4 w-4" />
-            Rerun Failed
+            Rerun
           </Button>
         </div>
       </div>
 
-      {/* Progress */}
+      {/* ── Progress ── */}
       {isRunning && (
         <Card>
           <CardContent className="pt-6">
             <div className="space-y-2">
               <div className="flex justify-between text-sm">
-                <span>Running tests...</span>
+                <span className="flex items-center gap-1.5">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Running tests…
+                </span>
                 <span>{progress}%</span>
               </div>
               <Progress value={progress} />
@@ -123,26 +283,23 @@ export function TestRunnerPage() {
         </Card>
       )}
 
-      {/* Test Layers Grid */}
+      {/* ── Layer Cards ── */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        {testLayers.map(layer => (
+        {layerStats.map((layer) => (
           <Card
             key={layer.id}
             className={cn(
               'cursor-pointer transition-all hover:shadow-md',
-              selectedLayer === layer.id && 'ring-2 ring-primary'
+              selectedResult?.test_layer === layer.id && 'ring-2 ring-primary'
             )}
-            onClick={() => setSelectedLayer(layer.id)}
           >
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">
-                {layer.name}
-              </CardTitle>
+              <CardTitle className="text-sm font-medium">{layer.name}</CardTitle>
               <layer.icon className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
               <div className="flex items-center justify-between">
-                <div className="text-2xl font-bold">{layer.tests}</div>
+                <div className="text-2xl font-bold">{layer.tests || '—'}</div>
                 <Badge
                   variant={
                     layer.status === 'passed'
@@ -174,14 +331,47 @@ export function TestRunnerPage() {
         ))}
       </div>
 
-      {/* Details Tabs */}
+      {/* ── Main Tabs ── */}
       <Tabs defaultValue="logs">
         <TabsList>
-          <TabsTrigger value="logs">Logs</TabsTrigger>
-          <TabsTrigger value="screenshots">Screenshots</TabsTrigger>
-          <TabsTrigger value="network">Network</TabsTrigger>
+          <TabsTrigger value="logs">
+            <Clock className="mr-2 h-4 w-4" />
+            Logs
+          </TabsTrigger>
+          <TabsTrigger value="results">
+            <CheckCircle2 className="mr-2 h-4 w-4" />
+            Results
+            {results.length > 0 && (
+              <Badge variant="secondary" className="ml-1.5 h-4 px-1 text-xs">
+                {results.length}
+              </Badge>
+            )}
+          </TabsTrigger>
+          <TabsTrigger value="screenshots">
+            <Image className="mr-2 h-4 w-4" />
+            Screenshots
+            {allScreenshots.length > 0 && (
+              <Badge variant="secondary" className="ml-1.5 h-4 px-1 text-xs">
+                {allScreenshots.length}
+              </Badge>
+            )}
+          </TabsTrigger>
+          <TabsTrigger value="network">
+            <Globe className="mr-2 h-4 w-4" />
+            Network
+            {allNetworkRequests.length > 0 && (
+              <Badge variant="secondary" className="ml-1.5 h-4 px-1 text-xs">
+                {allNetworkRequests.length}
+              </Badge>
+            )}
+          </TabsTrigger>
+          <TabsTrigger value="editor">
+            <Code2 className="mr-2 h-4 w-4" />
+            Editor
+          </TabsTrigger>
         </TabsList>
 
+        {/* ── Logs Tab ── */}
         <TabsContent value="logs" className="mt-4">
           <Card>
             <CardHeader>
@@ -189,49 +379,342 @@ export function TestRunnerPage() {
               <CardDescription>Real-time output from test execution</CardDescription>
             </CardHeader>
             <CardContent>
-              <ScrollArea className="h-[400px] rounded-md border bg-muted/50 p-4 font-mono text-sm">
-                {mockLogs.map((log, i) => (
-                  <div
-                    key={i}
-                    className={cn(
-                      'py-1',
-                      log.level === 'error' && 'text-red-500',
-                      log.level === 'success' && 'text-green-500',
-                      log.level === 'info' && 'text-muted-foreground'
-                    )}
-                  >
-                    <span className="text-muted-foreground">[{log.time}]</span>{' '}
-                    {log.message}
-                  </div>
-                ))}
+              <ScrollArea className="h-[400px] rounded-md border bg-zinc-950 p-4 font-mono text-sm">
+                {logs.length === 0 ? (
+                  <p className="text-zinc-500">No logs yet. Start a test run to see output.</p>
+                ) : (
+                  logs.map((log, i) => (
+                    <div
+                      key={i}
+                      className={cn(
+                        'py-0.5',
+                        log.level === 'error' && 'text-red-400',
+                        log.level === 'success' && 'text-green-400',
+                        log.level === 'warn' && 'text-yellow-400',
+                        log.level === 'info' && 'text-zinc-400'
+                      )}
+                    >
+                      <span className="text-zinc-600">[{log.time}]</span>{' '}
+                      {log.message}
+                    </div>
+                  ))
+                )}
+                <div ref={logsEndRef} />
               </ScrollArea>
             </CardContent>
           </Card>
         </TabsContent>
 
+        {/* ── Results Tab ── */}
+        <TabsContent value="results" className="mt-4">
+          <div className="grid gap-4 lg:grid-cols-5">
+            {/* Result list */}
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <CardTitle className="text-lg">Test Results</CardTitle>
+              </CardHeader>
+              <CardContent className="p-0">
+                <ScrollArea className="h-[480px]">
+                  {results.length === 0 ? (
+                    <p className="p-6 text-sm text-muted-foreground">No results yet.</p>
+                  ) : (
+                    results.map((r) => (
+                      <button
+                        key={r.id}
+                        className={cn(
+                          'w-full text-left px-4 py-3 border-b last:border-b-0 hover:bg-muted/50 transition-colors flex items-start gap-3',
+                          selectedResult?.id === r.id && 'bg-muted'
+                        )}
+                        onClick={() => setSelectedResult(r)}
+                      >
+                        <span className={cn('mt-0.5 text-sm', STATUS_COLORS[r.status])}>
+                          {r.status === 'passed' ? (
+                            <CheckCircle2 className="h-4 w-4" />
+                          ) : r.status === 'skipped' ? (
+                            <Clock className="h-4 w-4" />
+                          ) : (
+                            <XCircle className="h-4 w-4" />
+                          )}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium truncate">{r.test_name}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {r.test_layer} · {r.duration_ms ? `${r.duration_ms}ms` : '—'}
+                          </p>
+                        </div>
+                        <ChevronRight className="h-4 w-4 text-muted-foreground mt-0.5 flex-shrink-0" />
+                      </button>
+                    ))
+                  )}
+                </ScrollArea>
+              </CardContent>
+            </Card>
+
+            {/* Result detail */}
+            <Card className="lg:col-span-3">
+              <CardHeader>
+                <CardTitle className="text-lg">
+                  {selectedResult ? selectedResult.test_name : 'Select a result'}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {!selectedResult ? (
+                  <p className="text-sm text-muted-foreground">
+                    Click a result on the left to see details.
+                  </p>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="flex gap-2 flex-wrap">
+                      <Badge
+                        variant={
+                          selectedResult.status === 'passed'
+                            ? 'success'
+                            : selectedResult.status === 'skipped'
+                              ? 'secondary'
+                              : 'destructive'
+                        }
+                      >
+                        {selectedResult.status}
+                      </Badge>
+                      <Badge variant="outline">{selectedResult.test_layer}</Badge>
+                      {selectedResult.duration_ms && (
+                        <Badge variant="outline">{selectedResult.duration_ms}ms</Badge>
+                      )}
+                      {selectedResult.trace_id && (
+                        <Badge variant="outline" className="font-mono text-xs">
+                          trace: {selectedResult.trace_id.slice(0, 12)}…
+                        </Badge>
+                      )}
+                    </div>
+
+                    {selectedResult.error_message && (
+                      <div>
+                        <p className="text-xs font-semibold text-destructive mb-1">Error</p>
+                        <pre className="text-xs bg-zinc-950 text-red-300 p-3 rounded-md overflow-x-auto whitespace-pre-wrap">
+                          {selectedResult.error_message}
+                        </pre>
+                      </div>
+                    )}
+
+                    {selectedResult.error_stack && (
+                      <div>
+                        <p className="text-xs font-semibold text-muted-foreground mb-1">Stack Trace</p>
+                        <pre className="text-xs bg-zinc-950 text-zinc-300 p-3 rounded-md overflow-x-auto h-40">
+                          {selectedResult.error_stack}
+                        </pre>
+                      </div>
+                    )}
+
+                    {selectedResult.screenshot_path && (
+                      <div>
+                        <p className="text-xs font-semibold text-muted-foreground mb-1">Screenshot</p>
+                        <img
+                          src={screenshotUrl(selectedResult.screenshot_path)}
+                          alt="Test screenshot"
+                          className="rounded-md border max-h-48 object-contain"
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
+        {/* ── Screenshots Tab ── */}
         <TabsContent value="screenshots" className="mt-4">
           <Card>
             <CardHeader>
               <CardTitle className="text-lg">Screenshots</CardTitle>
-              <CardDescription>Captured screenshots from test steps</CardDescription>
+              <CardDescription>
+                Captured on test failure by Playwright
+              </CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="flex items-center justify-center py-12 text-muted-foreground">
-                No screenshots captured yet
-              </div>
+              {allScreenshots.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-2">
+                  <Image className="h-10 w-10 opacity-30" />
+                  <p className="text-sm">No screenshots captured yet</p>
+                  <p className="text-xs">Screenshots are taken automatically on test failure</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                  {allScreenshots.map((r) => (
+                    <div key={r.id} className="group relative">
+                      <img
+                        src={screenshotUrl(r.screenshot_path!)}
+                        alt={r.test_name}
+                        className="w-full h-40 object-cover rounded-md border cursor-pointer hover:opacity-90 transition-opacity"
+                        onClick={() =>
+                          window.open(screenshotUrl(r.screenshot_path!), '_blank')
+                        }
+                      />
+                      <div className="mt-1">
+                        <p className="text-xs font-medium truncate">{r.test_name}</p>
+                        <div className="flex items-center gap-1 mt-0.5">
+                          <Badge
+                            variant={r.status === 'passed' ? 'success' : 'destructive'}
+                            className="text-xs px-1"
+                          >
+                            {r.status}
+                          </Badge>
+                          <span className="text-xs text-muted-foreground">{r.test_layer}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
         </TabsContent>
 
+        {/* ── Network Tab ── */}
         <TabsContent value="network" className="mt-4">
           <Card>
             <CardHeader>
               <CardTitle className="text-lg">Network Requests</CardTitle>
-              <CardDescription>HTTP requests made during tests</CardDescription>
+              <CardDescription>
+                HTTP requests captured via Playwright request events
+              </CardDescription>
             </CardHeader>
-            <CardContent>
-              <div className="flex items-center justify-center py-12 text-muted-foreground">
-                No network requests captured yet
+            <CardContent className="p-0">
+              {allNetworkRequests.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-2">
+                  <Globe className="h-10 w-10 opacity-30" />
+                  <p className="text-sm">No network requests captured yet</p>
+                  <p className="text-xs">Requests are captured during test execution</p>
+                </div>
+              ) : (
+                <ScrollArea className="h-[480px]">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-muted">
+                      <tr>
+                        <th className="text-left px-4 py-2 font-semibold text-muted-foreground">Method</th>
+                        <th className="text-left px-4 py-2 font-semibold text-muted-foreground">Status</th>
+                        <th className="text-left px-4 py-2 font-semibold text-muted-foreground">URL</th>
+                        <th className="text-left px-4 py-2 font-semibold text-muted-foreground">Type</th>
+                        <th className="text-left px-4 py-2 font-semibold text-muted-foreground">Test</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {allNetworkRequests.map((req, i) => (
+                        <tr
+                          key={i}
+                          className="border-b last:border-b-0 hover:bg-muted/40 transition-colors"
+                        >
+                          <td className="px-4 py-2">
+                            <span
+                              className={cn(
+                                'font-mono font-bold',
+                                req.method === 'GET' && 'text-blue-500',
+                                req.method === 'POST' && 'text-green-500',
+                                req.method === 'PUT' && 'text-yellow-500',
+                                req.method === 'DELETE' && 'text-red-500',
+                                req.method === 'PATCH' && 'text-purple-500'
+                              )}
+                            >
+                              {req.method}
+                            </span>
+                          </td>
+                          <td className="px-4 py-2">
+                            {req.status ? (
+                              <span
+                                className={cn(
+                                  'font-mono font-semibold',
+                                  req.status < 300 && 'text-green-500',
+                                  req.status >= 300 && req.status < 400 && 'text-yellow-500',
+                                  req.status >= 400 && 'text-red-500'
+                                )}
+                              >
+                                {req.status}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-2 font-mono max-w-xs truncate" title={req.url}>
+                            {req.url}
+                          </td>
+                          <td className="px-4 py-2 text-muted-foreground">
+                            {req.content_type?.split(';')[0] || '—'}
+                          </td>
+                          <td className="px-4 py-2 text-muted-foreground truncate max-w-[140px]">
+                            {req.test_name}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </ScrollArea>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* ── Editor Tab ── */}
+        <TabsContent value="editor" className="mt-4">
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0">
+              <div>
+                <CardTitle className="text-lg">Test Editor</CardTitle>
+                <CardDescription>
+                  Write Playwright tests — TypeScript with full IntelliSense
+                </CardDescription>
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={async () => {
+                    if (!activeProjectId) return
+                    try {
+                      const res = await apiClient.generateTests(activeProjectId, editorCode)
+                      if (res.tests?.[0]) setEditorCode(res.tests[0])
+                    } catch {/* ignore */}
+                  }}
+                >
+                  ✨ Generate with AI
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={handleStart}
+                  disabled={isRunning || !activeProjectId}
+                >
+                  <Play className="mr-1.5 h-3.5 w-3.5" />
+                  Run
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="h-[500px] rounded-b-lg overflow-hidden border-t">
+                <Suspense
+                  fallback={
+                    <div className="flex items-center justify-center h-full text-muted-foreground text-sm gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Loading editor…
+                    </div>
+                  }
+                >
+                  <MonacoEditor
+                    height="100%"
+                    language="typescript"
+                    theme={theme}
+                    value={editorCode}
+                    onChange={(val) => setEditorCode(val ?? '')}
+                    options={{
+                      minimap: { enabled: false },
+                      fontSize: 13,
+                      lineHeight: 20,
+                      tabSize: 2,
+                      wordWrap: 'on',
+                      scrollBeyondLastLine: false,
+                      automaticLayout: true,
+                      padding: { top: 16, bottom: 16 },
+                    }}
+                  />
+                </Suspense>
               </div>
             </CardContent>
           </Card>

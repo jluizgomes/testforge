@@ -9,8 +9,8 @@ from sqlalchemy.orm import selectinload
 
 from app.db.session import get_db
 from app.models.project import Project
-from app.models.test_run import TestRun, TestRunStatus
-from app.schemas.test_run import TestRunCreate, TestRunResponse, TestRunUpdate
+from app.models.test_run import TestResult, TestRun, TestRunStatus
+from app.schemas.test_run import TestResultResponse, TestRunCreate, TestRunResponse, TestRunUpdate
 
 router = APIRouter()
 
@@ -220,6 +220,23 @@ async def stop_test_run(
     await db.refresh(test_run)
 
     return test_run
+
+
+@router.get("/{run_id}/results", response_model=list[TestResultResponse])
+async def list_test_results(
+    project_id: str,
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> list[TestResult]:
+    """List all test results for a given run."""
+    await get_project_or_404(project_id, db)
+
+    result = await db.execute(
+        select(TestResult)
+        .where(TestResult.test_run_id == run_id)
+        .order_by(TestResult.created_at.asc())
+    )
+    return list(result.scalars().all())
 
 
 @router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT)

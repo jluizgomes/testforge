@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import {
   Card,
   CardContent,
@@ -15,8 +16,15 @@ import {
   Clock,
   TrendingUp,
   BarChart3,
+  Plus,
+  Trash2,
+  ToggleLeft,
+  ToggleRight,
+  Loader2,
 } from 'lucide-react'
 import { formatDate } from '@/lib/utils'
+import { apiClient, type ReportSchedule } from '@/services/api-client'
+import { ScheduleReportDialog } from '../components/ScheduleReportDialog'
 
 const recentReports = [
   {
@@ -45,7 +53,64 @@ const recentReports = [
   },
 ]
 
+const FORMAT_COLORS: Record<string, string> = {
+  html: 'bg-blue-500/10 text-blue-600 border-blue-200',
+  pdf: 'bg-red-500/10 text-red-600 border-red-200',
+  json: 'bg-amber-500/10 text-amber-600 border-amber-200',
+  xml: 'bg-purple-500/10 text-purple-600 border-purple-200',
+  markdown: 'bg-slate-500/10 text-slate-600 border-slate-200',
+}
+
 export function ReportsPage() {
+  const [schedules, setSchedules] = useState<ReportSchedule[]>([])
+  const [loadingSchedules, setLoadingSchedules] = useState(false)
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [togglingId, setTogglingId] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+
+  const loadSchedules = () => {
+    setLoadingSchedules(true)
+    apiClient
+      .getSchedules()
+      .then(setSchedules)
+      .catch(() => {})
+      .finally(() => setLoadingSchedules(false))
+  }
+
+  useEffect(() => {
+    loadSchedules()
+  }, [])
+
+  const handleCreated = (schedule: ReportSchedule) => {
+    setSchedules(prev => [schedule, ...prev])
+  }
+
+  const handleToggle = async (schedule: ReportSchedule) => {
+    setTogglingId(schedule.id)
+    try {
+      const updated = await apiClient.updateSchedule(schedule.id, {
+        enabled: !schedule.enabled,
+      })
+      setSchedules(prev => prev.map(s => (s.id === updated.id ? updated : s)))
+    } catch {
+      // ignore
+    } finally {
+      setTogglingId(null)
+    }
+  }
+
+  const handleDelete = async (id: string) => {
+    setDeletingId(id)
+    try {
+      await apiClient.deleteSchedule(id)
+      setSchedules(prev => prev.filter(s => s.id !== id))
+    } catch {
+      // ignore
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -113,10 +178,18 @@ export function ReportsPage() {
       <Tabs defaultValue="recent">
         <TabsList>
           <TabsTrigger value="recent">Recent Reports</TabsTrigger>
-          <TabsTrigger value="scheduled">Scheduled</TabsTrigger>
+          <TabsTrigger value="scheduled">
+            Scheduled
+            {schedules.length > 0 && (
+              <span className="ml-1.5 rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                {schedules.length}
+              </span>
+            )}
+          </TabsTrigger>
           <TabsTrigger value="templates">Templates</TabsTrigger>
         </TabsList>
 
+        {/* ── Recent Reports ── */}
         <TabsContent value="recent" className="mt-6">
           <Card>
             <CardHeader>
@@ -166,19 +239,124 @@ export function ReportsPage() {
           </Card>
         </TabsContent>
 
+        {/* ── Scheduled ── */}
         <TabsContent value="scheduled" className="mt-6">
           <Card>
-            <CardContent className="flex flex-col items-center justify-center py-12">
-              <Calendar className="h-16 w-16 text-muted-foreground" />
-              <h3 className="mt-4 text-lg font-semibold">No scheduled reports</h3>
-              <p className="mt-2 text-center text-muted-foreground">
-                Set up automatic report generation on a schedule.
-              </p>
-              <Button className="mt-4">Create Schedule</Button>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle>Scheduled Reports</CardTitle>
+                  <CardDescription>
+                    Automatically generate reports on a recurring schedule
+                  </CardDescription>
+                </div>
+                <Button onClick={() => setDialogOpen(true)} size="sm">
+                  <Plus className="mr-2 h-4 w-4" />
+                  New Schedule
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {loadingSchedules ? (
+                <div className="flex items-center justify-center py-12 gap-2 text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading schedules…
+                </div>
+              ) : schedules.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <Calendar className="h-16 w-16 text-muted-foreground opacity-30" />
+                  <h3 className="mt-4 text-lg font-semibold">No scheduled reports</h3>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Set up automatic report generation on a schedule.
+                  </p>
+                  <Button className="mt-4" onClick={() => setDialogOpen(true)}>
+                    <Plus className="mr-2 h-4 w-4" />
+                    Create Schedule
+                  </Button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {schedules.map(schedule => (
+                    <div
+                      key={schedule.id}
+                      className="flex items-center justify-between rounded-lg border p-4"
+                    >
+                      <div className="flex items-start gap-3">
+                        <Calendar className="mt-0.5 h-4 w-4 text-muted-foreground shrink-0" />
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium">{schedule.name}</span>
+                            <span
+                              className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${
+                                FORMAT_COLORS[schedule.format] ?? 'bg-muted text-muted-foreground'
+                              }`}
+                            >
+                              {schedule.format}
+                            </span>
+                            {!schedule.enabled && (
+                              <Badge variant="outline" className="text-xs">
+                                Paused
+                              </Badge>
+                            )}
+                          </div>
+                          <div className="mt-0.5 flex items-center gap-3 text-xs text-muted-foreground">
+                            <span className="font-mono">{schedule.cron_expr}</span>
+                            {schedule.next_run_at && (
+                              <>
+                                <span>·</span>
+                                <span>Next: {formatDate(schedule.next_run_at)}</span>
+                              </>
+                            )}
+                            {schedule.run_count > 0 && (
+                              <>
+                                <span>·</span>
+                                <span>{schedule.run_count} runs</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                          title={schedule.enabled ? 'Pause schedule' : 'Enable schedule'}
+                          disabled={togglingId === schedule.id}
+                          onClick={() => handleToggle(schedule)}
+                        >
+                          {togglingId === schedule.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : schedule.enabled ? (
+                            <ToggleRight className="h-4 w-4 text-green-500" />
+                          ) : (
+                            <ToggleLeft className="h-4 w-4" />
+                          )}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-destructive hover:text-destructive"
+                          disabled={deletingId === schedule.id}
+                          onClick={() => handleDelete(schedule.id)}
+                        >
+                          {deletingId === schedule.id ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Trash2 className="h-3.5 w-3.5" />
+                          )}
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
         </TabsContent>
 
+        {/* ── Templates ── */}
         <TabsContent value="templates" className="mt-6">
           <div className="grid gap-4 md:grid-cols-3">
             <Card>
@@ -225,6 +403,13 @@ export function ReportsPage() {
           </div>
         </TabsContent>
       </Tabs>
+
+      {/* Schedule Dialog */}
+      <ScheduleReportDialog
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
+        onCreated={handleCreated}
+      />
     </div>
   )
 }

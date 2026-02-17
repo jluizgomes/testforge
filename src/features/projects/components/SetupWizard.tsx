@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import {
   Card,
   CardContent,
@@ -37,6 +37,10 @@ const steps = [
 
 export function SetupWizard({ onClose }: SetupWizardProps) {
   const [currentStep, setCurrentStep] = useState(1)
+  const [isScanning, setIsScanning] = useState(false)
+  const [scanSummary, setScanSummary] = useState<string | null>(null)
+  const discoveredStructureRef = useRef<Record<string, unknown> | null>(null)
+
   const {
     config,
     updateConfig,
@@ -67,11 +71,29 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
     }
   }
 
+  const triggerProjectScan = async (projectPath: string) => {
+    if (!window.electronAPI) return
+    setIsScanning(true)
+    setScanSummary(null)
+    try {
+      const structure = await window.electronAPI.fs.scanProject(projectPath)
+      discoveredStructureRef.current = structure
+      const total = (structure as { total_files?: number }).total_files ?? 0
+      const eps = ((structure as { entry_points?: unknown[] }).entry_points ?? []).length
+      setScanSummary(`Found ${total} files · ${eps} entry points`)
+    } catch {
+      setScanSummary('Scan unavailable — backend will scan on create')
+    } finally {
+      setIsScanning(false)
+    }
+  }
+
   const selectProjectPath = async () => {
     if (typeof window !== 'undefined' && window.electronAPI) {
-      const path = await window.electronAPI.file.openProject()
-      if (path) {
-        updateConfig({ path })
+      const projectPath = await window.electronAPI.file.openProject()
+      if (projectPath) {
+        updateConfig({ path: projectPath })
+        triggerProjectScan(projectPath)
       }
     }
   }
@@ -153,7 +175,10 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
                   <Input
                     id="path"
                     value={config.path}
-                    onChange={e => updateConfig({ path: e.target.value })}
+                    onChange={e => {
+                      updateConfig({ path: e.target.value })
+                      if (e.target.value.length > 3) triggerProjectScan(e.target.value)
+                    }}
                     placeholder="/path/to/project"
                   />
                   <Button variant="outline" onClick={selectProjectPath}>
@@ -161,6 +186,19 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
                     Browse
                   </Button>
                 </div>
+                {/* Scanning feedback */}
+                {isScanning && (
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Scanning project files…
+                  </div>
+                )}
+                {!isScanning && scanSummary && (
+                  <div className="flex items-center gap-1.5 text-xs text-green-600">
+                    <CheckCircle2 className="h-3 w-3" />
+                    {scanSummary}
+                  </div>
+                )}
               </div>
             </>
           )}
@@ -175,7 +213,7 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
                     id="frontendUrl"
                     value={config.frontendUrl}
                     onChange={e => updateConfig({ frontendUrl: e.target.value })}
-                    placeholder="http://localhost:3000"
+                    placeholder="http://jluizgomes.local:3000"
                   />
                   <Button
                     variant="outline"
@@ -207,7 +245,7 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
                     id="backendUrl"
                     value={config.backendUrl}
                     onChange={e => updateConfig({ backendUrl: e.target.value })}
-                    placeholder="http://localhost:8000"
+                    placeholder="http://jluizgomes.local:8000"
                   />
                   <Button
                     variant="outline"
@@ -232,7 +270,7 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
                   id="openApiUrl"
                   value={config.openApiUrl}
                   onChange={e => updateConfig({ openApiUrl: e.target.value })}
-                  placeholder="http://localhost:8000/openapi.json"
+                  placeholder="http://jluizgomes.local:8000/openapi.json"
                 />
               </div>
             </>
@@ -248,7 +286,7 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
                     id="databaseUrl"
                     value={config.databaseUrl}
                     onChange={e => updateConfig({ databaseUrl: e.target.value })}
-                    placeholder="postgresql://user:pass@localhost:5432/db"
+                    placeholder="postgresql://user:pass@jluizgomes.local:5432/db"
                   />
                   <Button
                     variant="outline"
@@ -273,7 +311,7 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
                   id="redisUrl"
                   value={config.redisUrl}
                   onChange={e => updateConfig({ redisUrl: e.target.value })}
-                  placeholder="redis://localhost:6379"
+                  placeholder="redis://jluizgomes.local:6379"
                 />
               </div>
             </>

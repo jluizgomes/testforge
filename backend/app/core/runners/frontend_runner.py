@@ -30,14 +30,12 @@ class FrontendRunner(BaseRunner):
 
             self._playwright = await async_playwright().start()
 
-            # Select browser
             browser_type = getattr(self._playwright, self.config.browser, self._playwright.chromium)
             self._browser = await browser_type.launch(
                 headless=self.config.headless,
                 slow_mo=self.config.slow_mo,
             )
 
-            # Create context with viewport
             self._context = await self._browser.new_context(
                 viewport={
                     "width": self.config.viewport_width,
@@ -46,13 +44,9 @@ class FrontendRunner(BaseRunner):
                 record_video_dir=str(self._video_dir) if self.config.extra.get("record_video") else None,
             )
 
-            # Create page
             self._page = await self._context.new_page()
-
-            # Set default timeout
             self._page.set_default_timeout(self.config.timeout_ms)
 
-            # Ensure directories exist
             self._screenshot_dir.mkdir(parents=True, exist_ok=True)
             self._video_dir.mkdir(parents=True, exist_ok=True)
 
@@ -74,7 +68,7 @@ class FrontendRunner(BaseRunner):
         self._playwright = None
 
     async def run_test(self, test_name: str, test_fn: Callable) -> TestResult:
-        """Run a single frontend test."""
+        """Run a single frontend test with trace ID injection and network capture."""
         result = TestResult(
             name=test_name,
             started_at=datetime.now(),
@@ -82,7 +76,38 @@ class FrontendRunner(BaseRunner):
 
         start_time = datetime.now()
 
+        # Generate unique trace ID for this test
+        trace_id = uuid4().hex
+        result.trace_id = trace_id
+
+        # Captured network requests for this test
+        network_requests: list[dict[str, Any]] = []
+
+        async def _on_request(request: Any) -> None:
+            network_requests.append({
+                "url": request.url,
+                "method": request.method,
+                "headers": dict(request.headers),
+                "timestamp": datetime.now().isoformat(),
+            })
+
+        async def _on_response(response: Any) -> None:
+            # Attach status to the matching last request entry
+            if network_requests:
+                last = network_requests[-1]
+                if last.get("url") == response.url:
+                    last["status"] = response.status
+                    last["content_type"] = response.headers.get("content-type", "")
+
         try:
+            # Inject trace ID header and attach network listeners
+            if self._page:
+                await self._page.set_extra_http_headers({
+                    "X-TestForge-TraceID": trace_id,
+                })
+                self._page.on("request", _on_request)
+                self._page.on("response", _on_response)
+
             # Execute the test function with the page
             await test_fn(self._page)
             result.status = TestStatus.PASSED
@@ -91,34 +116,38 @@ class FrontendRunner(BaseRunner):
             result.status = TestStatus.FAILED
             result.error_message = str(e)
             result.error_stack = traceback.format_exc()
-
-            # Take screenshot on failure
-            screenshot_path = await self._capture_screenshot(test_name)
-            result.screenshot_path = screenshot_path
+            result.screenshot_path = await self._capture_screenshot(test_name)
 
         except Exception as e:
             result.status = TestStatus.ERROR
             result.error_message = str(e)
             result.error_stack = traceback.format_exc()
-
-            # Take screenshot on error
-            screenshot_path = await self._capture_screenshot(test_name)
-            result.screenshot_path = screenshot_path
+            result.screenshot_path = await self._capture_screenshot(test_name)
 
         finally:
+            # Remove listeners to avoid cross-test pollution
+            if self._page:
+                self._page.remove_listener("request", _on_request)
+                self._page.remove_listener("response", _on_response)
+
             end_time = datetime.now()
             result.completed_at = end_time
             result.duration_ms = int((end_time - start_time).total_seconds() * 1000)
 
+            # Persist network requests in metadata
+            if network_requests:
+                result.metadata["network_requests"] = network_requests
+
         return result
 
     async def _capture_screenshot(self, test_name: str) -> str | None:
-        """Capture a screenshot of the current page."""
+        """Capture a screenshot of the current page on failure."""
         if not self._page:
             return None
 
         try:
-            filename = f"{test_name.replace(' ', '_')}_{uuid4().hex[:8]}.png"
+            safe_name = test_name.replace(" ", "_").replace("/", "_")
+            filename = f"{safe_name}_{uuid4().hex[:8]}.png"
             path = self._screenshot_dir / filename
             await self._page.screenshot(path=str(path), full_page=True)
             return str(path)
@@ -175,9 +204,7 @@ class FrontendRunner(BaseRunner):
 
     async def get_console_logs(self) -> list[str]:
         """Get console logs from the page."""
-        logs = []
-
+        logs: list[str] = []
         if self._page:
             self._page.on("console", lambda msg: logs.append(f"[{msg.type}] {msg.text}"))
-
         return logs

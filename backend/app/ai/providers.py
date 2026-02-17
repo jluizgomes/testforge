@@ -154,7 +154,7 @@ class OpenAIProvider(AIProvider):
 class OllamaProvider(AIProvider):
     """Ollama local LLM provider."""
 
-    def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3.1:8b") -> None:
+    def __init__(self, base_url: str = "http://jluizgomes.local:11434", model: str = "llama3.1:8b") -> None:
         """Initialize Ollama provider."""
         self.base_url = base_url
         self.model = model

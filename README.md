@@ -23,7 +23,7 @@ TestForge AI is a comprehensive testing platform that combines:
 ## Prerequisites
 
 - Node.js 18+
-- Python 3.11+
+- Miniconda/Anaconda (Python env via conda only)
 - PostgreSQL 16+
 - Redis (optional)
 - Ollama (optional, for local AI)
@@ -35,15 +35,12 @@ TestForge AI is a comprehensive testing platform that combines:
 ```bash
 cd testforge
 
-# Install frontend dependencies
-npm install
+# Create conda env (run once)
+conda create -n testforge-env python=3.12
+conda activate testforge-env
 
-# Install backend dependencies
-cd backend
-pip install -e ".[dev]"
-
-# Install Playwright browsers
-playwright install
+# Install all dependencies (Makefile uses conda run -n testforge-env)
+make install
 ```
 
 ### 2. Configure Environment
@@ -68,20 +65,17 @@ docker run -d --name testforge-db \
 ### 4. Initialize Database
 
 ```bash
-cd backend
-alembic upgrade head
+make db-upgrade
 ```
 
 ### 5. Start Development
 
 ```bash
 # Terminal 1: Start backend
-cd backend
-uvicorn app.main:app --reload --port 8000
+make dev-backend
 
 # Terminal 2: Start frontend (Electron)
-cd ..
-npm run electron:dev
+make dev-electron
 ```
 
 ## Project Structure
@@ -247,25 +241,15 @@ pyinstaller --onefile -n testforge-backend app/main.py
 
 ### Run Tests
 ```bash
-# Frontend tests
-npm run test
-
-# Backend tests
-cd backend
-pytest
+make test-frontend
+make test-backend
 ```
 
 ### Code Quality
 ```bash
-# Frontend
-npm run lint
-npm run format
-
-# Backend
-cd backend
-ruff check .
-black .
-mypy app
+make lint
+make format
+make typecheck
 ```
 
 ## License

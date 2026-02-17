@@ -2,11 +2,52 @@
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.db.session import get_db
+from app.models.test_run import TestResult, TestRun
+from app.reports.exporters import (
+    HTMLExporter,
+    JUnitXMLExporter,
+    JSONExporter,
+    MarkdownExporter,
+    PDFExporter,
+)
+from app.reports.generator import ReportGenerator
 
 router = APIRouter()
+
+_generator = ReportGenerator()
+_exporters = {
+    "html": HTMLExporter(_generator),
+    "pdf": PDFExporter(_generator),
+    "json": JSONExporter(),
+    "xml": JUnitXMLExporter(),
+    "markdown": MarkdownExporter(),
+}
+
+ReportFormat = Literal["html", "pdf", "json", "xml", "markdown"]
+
+_CONTENT_TYPES: dict[str, str] = {
+    "html": "text/html; charset=utf-8",
+    "pdf": "application/pdf",
+    "json": "application/json; charset=utf-8",
+    "xml": "application/xml; charset=utf-8",
+    "markdown": "text/markdown; charset=utf-8",
+}
+
+_EXTENSIONS: dict[str, str] = {
+    "html": ".html",
+    "pdf": ".pdf",
+    "json": ".json",
+    "xml": ".xml",
+    "markdown": ".md",
+}
 
 
 class GenerateReportRequest(BaseModel):
@@ -14,108 +55,75 @@ class GenerateReportRequest(BaseModel):
 
     project_id: str
     run_id: str
-    format: Literal["html", "pdf", "json"] = "html"
+    format: ReportFormat = "html"
     template: str | None = None
 
 
-class ReportMetadata(BaseModel):
-    """Metadata about a generated report."""
-
-    id: str
-    project_id: str
-    run_id: str
-    format: str
-    size_bytes: int
-    created_at: str
-
-
 @router.post("/generate")
-async def generate_report(request: GenerateReportRequest) -> Response:
-    """Generate a test report in the specified format."""
-    # This is a placeholder - actual implementation would use Jinja2/WeasyPrint
-    if request.format == "html":
-        content = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>TestForge AI - Test Report</title>
-    <style>
-        body {{ font-family: system-ui, sans-serif; padding: 2rem; max-width: 1200px; margin: 0 auto; }}
-        .header {{ background: linear-gradient(135deg, #3b82f6, #1d4ed8); color: white; padding: 2rem; border-radius: 8px; }}
-        .summary {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin: 2rem 0; }}
-        .card {{ background: #f8fafc; padding: 1.5rem; border-radius: 8px; text-align: center; }}
-        .card h3 {{ margin: 0; color: #64748b; font-size: 0.875rem; }}
-        .card p {{ margin: 0.5rem 0 0; font-size: 2rem; font-weight: bold; }}
-        .passed {{ color: #22c55e; }}
-        .failed {{ color: #ef4444; }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>Test Report</h1>
-        <p>Project ID: {request.project_id}</p>
-        <p>Run ID: {request.run_id}</p>
-    </div>
-    <div class="summary">
-        <div class="card">
-            <h3>Total Tests</h3>
-            <p>156</p>
-        </div>
-        <div class="card">
-            <h3>Passed</h3>
-            <p class="passed">142</p>
-        </div>
-        <div class="card">
-            <h3>Failed</h3>
-            <p class="failed">8</p>
-        </div>
-        <div class="card">
-            <h3>Pass Rate</h3>
-            <p>91%</p>
-        </div>
-    </div>
-    <h2>Test Results</h2>
-    <p>Detailed results would appear here...</p>
-</body>
-</html>
-"""
-        return Response(
-            content=content,
-            media_type="text/html",
-            headers={"Content-Disposition": f'attachment; filename="report-{request.run_id}.html"'},
+async def generate_report(
+    request: GenerateReportRequest,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Generate a test report in the requested format using real test run data."""
+    # Fetch test run from DB
+    stmt = (
+        select(TestRun)
+        .where(
+            TestRun.id == request.run_id,
+            TestRun.project_id == request.project_id,
         )
+        .options(selectinload(TestRun.results))
+    )
+    result = await db.execute(stmt)
+    test_run = result.scalar_one_or_none()
 
-    elif request.format == "json":
-        import json
-
-        report_data = {
-            "project_id": request.project_id,
-            "run_id": request.run_id,
-            "summary": {
-                "total": 156,
-                "passed": 142,
-                "failed": 8,
-                "skipped": 6,
-                "pass_rate": 0.91,
-            },
-            "results": [],
-        }
-        return Response(
-            content=json.dumps(report_data, indent=2),
-            media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="report-{request.run_id}.json"'},
-        )
-
-    elif request.format == "pdf":
-        # PDF generation would use WeasyPrint
+    if test_run is None:
         raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail="PDF generation requires WeasyPrint to be properly configured",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Test run '{request.run_id}' not found for project '{request.project_id}'.",
         )
 
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail=f"Unsupported format: {request.format}",
+    # Build report data dict from the ORM objects
+    results_dicts = [
+        {
+            "test_name": r.test_name,
+            "test_file": r.test_file,
+            "test_suite": r.test_suite,
+            "test_layer": r.test_layer,
+            "status": r.status.value if hasattr(r.status, "value") else r.status,
+            "duration_ms": r.duration_ms,
+            "error_message": r.error_message,
+            "error_stack": r.error_stack,
+            "screenshot_path": r.screenshot_path,
+            "trace_id": r.trace_id,
+            **(r.extra_data or {}),
+        }
+        for r in test_run.results
+    ]
+
+    report_data = _generator.generate_report(
+        test_run=test_run,
+        results=results_dicts,
+    )
+
+    # Export
+    fmt = request.format
+    exporter = _exporters[fmt]
+
+    try:
+        content = exporter.export(report_data)
+    except RuntimeError as exc:
+        # WeasyPrint not installed
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    filename = f"report-{request.run_id}{_EXTENSIONS[fmt]}"
+    return Response(
+        content=content,
+        media_type=_CONTENT_TYPES[fmt],
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import {
   Card,
   CardContent,
@@ -18,19 +19,119 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
+import { Badge } from '@/components/ui/badge'
 import { useAppStore } from '@/stores/app-store'
+import { apiClient, type AppSettings } from '@/services/api-client'
+
+const DEFAULT_SETTINGS: AppSettings = {
+  ai_provider: 'openai',
+  ai_model: 'gpt-4',
+  openai_api_key: '',
+  ollama_url: 'http://localhost:11434',
+  notifications_desktop: true,
+  notifications_sound: false,
+  runner_parallel: true,
+  runner_auto_retry: false,
+  runner_screenshot_on_failure: true,
+  rag_auto_index: true,
+  rag_include_openapi: true,
+}
+
+type ConnStatus = 'idle' | 'checking' | 'ok' | 'error'
+
+interface ConnState {
+  status: ConnStatus
+  latency?: number
+  error?: string
+}
 
 export function SettingsPage() {
   const { theme, setTheme } = useAppStore()
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+
+  // Connection validation
+  const [dbUrl, setDbUrl] = useState('')
+  const [redisUrl, setRedisUrl] = useState('')
+  const [dbConn, setDbConn] = useState<ConnState>({ status: 'idle' })
+  const [redisConn, setRedisConn] = useState<ConnState>({ status: 'idle' })
+
+  useEffect(() => {
+    apiClient
+      .getSettings()
+      .then((s) => setSettings(s))
+      .catch(() => {/* use defaults */})
+      .finally(() => setLoading(false))
+  }, [])
+
+  const patch = (key: keyof AppSettings, value: AppSettings[keyof AppSettings]) => {
+    setSettings((prev) => ({ ...prev, [key]: value }))
+    setSaved(false)
+  }
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      const updated = await apiClient.updateSettings(settings)
+      setSettings(updated)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2500)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const validateConn = async (type: 'database' | 'redis', url: string) => {
+    const setter = type === 'database' ? setDbConn : setRedisConn
+    setter({ status: 'checking' })
+    try {
+      const res = await apiClient.validateConnection(type, url)
+      setter(
+        res.connected
+          ? { status: 'ok', latency: res.latency_ms }
+          : { status: 'error', error: res.error }
+      )
+    } catch (err: unknown) {
+      setter({ status: 'error', error: String(err) })
+    }
+  }
+
+  const ConnBadge = ({ state }: { state: ConnState }) => {
+    if (state.status === 'idle') return null
+    if (state.status === 'checking')
+      return <Badge variant="secondary">Checking…</Badge>
+    if (state.status === 'ok')
+      return (
+        <Badge className="bg-green-100 text-green-700">
+          Connected {state.latency !== undefined ? `· ${state.latency}ms` : ''}
+        </Badge>
+      )
+    return <Badge variant="destructive">{state.error || 'Failed'}</Badge>
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-48 text-muted-foreground">
+        Loading settings…
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold">Settings</h1>
-        <p className="text-muted-foreground">
-          Configure TestForge AI to match your preferences
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold">Settings</h1>
+          <p className="text-muted-foreground">
+            Configure TestForge AI to match your preferences
+          </p>
+        </div>
+        <Button onClick={handleSave} disabled={saving}>
+          {saving ? 'Saving…' : saved ? '✓ Saved' : 'Save Settings'}
+        </Button>
       </div>
 
       <Tabs defaultValue="general">
@@ -41,8 +142,8 @@ export function SettingsPage() {
           <TabsTrigger value="about">About</TabsTrigger>
         </TabsList>
 
+        {/* ── General ── */}
         <TabsContent value="general" className="mt-6 space-y-6">
-          {/* Appearance */}
           <Card>
             <CardHeader>
               <CardTitle>Appearance</CardTitle>
@@ -58,7 +159,10 @@ export function SettingsPage() {
                     Select your preferred color scheme
                   </p>
                 </div>
-                <Select value={theme} onValueChange={(v) => setTheme(v as 'light' | 'dark')}>
+                <Select
+                  value={theme}
+                  onValueChange={(v) => setTheme(v as 'light' | 'dark')}
+                >
                   <SelectTrigger className="w-32">
                     <SelectValue />
                   </SelectTrigger>
@@ -72,7 +176,6 @@ export function SettingsPage() {
             </CardContent>
           </Card>
 
-          {/* Notifications */}
           <Card>
             <CardHeader>
               <CardTitle>Notifications</CardTitle>
@@ -88,7 +191,10 @@ export function SettingsPage() {
                     Show notifications when tests complete
                   </p>
                 </div>
-                <Switch defaultChecked />
+                <Switch
+                  checked={settings.notifications_desktop}
+                  onCheckedChange={(v) => patch('notifications_desktop', v)}
+                />
               </div>
               <Separator />
               <div className="flex items-center justify-between">
@@ -98,12 +204,14 @@ export function SettingsPage() {
                     Play sounds for test results
                   </p>
                 </div>
-                <Switch />
+                <Switch
+                  checked={settings.notifications_sound}
+                  onCheckedChange={(v) => patch('notifications_sound', v)}
+                />
               </div>
             </CardContent>
           </Card>
 
-          {/* Test Runner */}
           <Card>
             <CardHeader>
               <CardTitle>Test Runner</CardTitle>
@@ -119,7 +227,10 @@ export function SettingsPage() {
                     Run tests in parallel for faster execution
                   </p>
                 </div>
-                <Switch defaultChecked />
+                <Switch
+                  checked={settings.runner_parallel}
+                  onCheckedChange={(v) => patch('runner_parallel', v)}
+                />
               </div>
               <Separator />
               <div className="flex items-center justify-between">
@@ -129,7 +240,10 @@ export function SettingsPage() {
                     Automatically retry failed tests once
                   </p>
                 </div>
-                <Switch />
+                <Switch
+                  checked={settings.runner_auto_retry}
+                  onCheckedChange={(v) => patch('runner_auto_retry', v)}
+                />
               </div>
               <Separator />
               <div className="flex items-center justify-between">
@@ -139,14 +253,17 @@ export function SettingsPage() {
                     Capture screenshots when tests fail
                   </p>
                 </div>
-                <Switch defaultChecked />
+                <Switch
+                  checked={settings.runner_screenshot_on_failure}
+                  onCheckedChange={(v) => patch('runner_screenshot_on_failure', v)}
+                />
               </div>
             </CardContent>
           </Card>
         </TabsContent>
 
+        {/* ── AI Settings ── */}
         <TabsContent value="ai" className="mt-6 space-y-6">
-          {/* AI Provider */}
           <Card>
             <CardHeader>
               <CardTitle>AI Provider</CardTitle>
@@ -157,7 +274,10 @@ export function SettingsPage() {
             <CardContent className="space-y-4">
               <div className="space-y-2">
                 <Label>Provider</Label>
-                <Select defaultValue="openai">
+                <Select
+                  value={settings.ai_provider}
+                  onValueChange={(v) => patch('ai_provider', v)}
+                >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
@@ -169,7 +289,10 @@ export function SettingsPage() {
               </div>
               <div className="space-y-2">
                 <Label>Model</Label>
-                <Select defaultValue="gpt-4">
+                <Select
+                  value={settings.ai_model}
+                  onValueChange={(v) => patch('ai_model', v)}
+                >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
@@ -181,16 +304,28 @@ export function SettingsPage() {
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label>API Key</Label>
-                <Input type="password" placeholder="sk-..." />
+                <Label>OpenAI API Key</Label>
+                <Input
+                  type="password"
+                  placeholder="sk-..."
+                  value={settings.openai_api_key}
+                  onChange={(e) => patch('openai_api_key', e.target.value)}
+                />
                 <p className="text-xs text-muted-foreground">
-                  Your API key is stored securely and never shared
+                  Stored locally in backend/data/settings.json — never shared externally
                 </p>
+              </div>
+              <div className="space-y-2">
+                <Label>Ollama URL</Label>
+                <Input
+                  placeholder="http://localhost:11434"
+                  value={settings.ollama_url}
+                  onChange={(e) => patch('ollama_url', e.target.value)}
+                />
               </div>
             </CardContent>
           </Card>
 
-          {/* RAG Settings */}
           <Card>
             <CardHeader>
               <CardTitle>RAG Configuration</CardTitle>
@@ -206,7 +341,10 @@ export function SettingsPage() {
                     Automatically index project files for context
                   </p>
                 </div>
-                <Switch defaultChecked />
+                <Switch
+                  checked={settings.rag_auto_index}
+                  onCheckedChange={(v) => patch('rag_auto_index', v)}
+                />
               </div>
               <Separator />
               <div className="flex items-center justify-between">
@@ -216,13 +354,77 @@ export function SettingsPage() {
                     Index OpenAPI specifications for API testing
                   </p>
                 </div>
-                <Switch defaultChecked />
+                <Switch
+                  checked={settings.rag_include_openapi}
+                  onCheckedChange={(v) => patch('rag_include_openapi', v)}
+                />
               </div>
             </CardContent>
           </Card>
         </TabsContent>
 
+        {/* ── Integrations ── */}
         <TabsContent value="integrations" className="mt-6 space-y-6">
+          {/* Connection Validation */}
+          <Card>
+            <CardHeader>
+              <CardTitle>System Connections</CardTitle>
+              <CardDescription>
+                Test connectivity to your database and Redis instance
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              {/* Database */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label>Database URL</Label>
+                  <ConnBadge state={dbConn} />
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="postgresql://user:pass@host:5432/db"
+                    value={dbUrl}
+                    onChange={(e) => setDbUrl(e.target.value)}
+                    className="font-mono text-xs"
+                  />
+                  <Button
+                    variant="outline"
+                    onClick={() => validateConn('database', dbUrl)}
+                    disabled={!dbUrl || dbConn.status === 'checking'}
+                  >
+                    Test
+                  </Button>
+                </div>
+              </div>
+
+              <Separator />
+
+              {/* Redis */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label>Redis URL</Label>
+                  <ConnBadge state={redisConn} />
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="redis://host:6379"
+                    value={redisUrl}
+                    onChange={(e) => setRedisUrl(e.target.value)}
+                    className="font-mono text-xs"
+                  />
+                  <Button
+                    variant="outline"
+                    onClick={() => validateConn('redis', redisUrl)}
+                    disabled={!redisUrl || redisConn.status === 'checking'}
+                  >
+                    Test
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Third-party integrations */}
           <Card>
             <CardHeader>
               <CardTitle>Connected Services</CardTitle>
@@ -231,37 +433,38 @@ export function SettingsPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="flex items-center justify-between rounded-lg border p-4">
-                <div>
-                  <h4 className="font-medium">GitHub</h4>
-                  <p className="text-sm text-muted-foreground">
-                    Connect to sync tests with repositories
-                  </p>
+              {[
+                {
+                  name: 'GitHub',
+                  desc: 'Connect to sync tests with repositories',
+                },
+                {
+                  name: 'Slack',
+                  desc: 'Get notifications in Slack channels',
+                },
+                {
+                  name: 'Jira',
+                  desc: 'Link test failures to Jira issues',
+                },
+              ].map((svc) => (
+                <div
+                  key={svc.name}
+                  className="flex items-center justify-between rounded-lg border p-4"
+                >
+                  <div>
+                    <h4 className="font-medium">{svc.name}</h4>
+                    <p className="text-sm text-muted-foreground">{svc.desc}</p>
+                  </div>
+                  <Button variant="outline" disabled>
+                    Coming soon
+                  </Button>
                 </div>
-                <Button variant="outline">Connect</Button>
-              </div>
-              <div className="flex items-center justify-between rounded-lg border p-4">
-                <div>
-                  <h4 className="font-medium">Slack</h4>
-                  <p className="text-sm text-muted-foreground">
-                    Get notifications in Slack channels
-                  </p>
-                </div>
-                <Button variant="outline">Connect</Button>
-              </div>
-              <div className="flex items-center justify-between rounded-lg border p-4">
-                <div>
-                  <h4 className="font-medium">Jira</h4>
-                  <p className="text-sm text-muted-foreground">
-                    Link test failures to Jira issues
-                  </p>
-                </div>
-                <Button variant="outline">Connect</Button>
-              </div>
+              ))}
             </CardContent>
           </Card>
         </TabsContent>
 
+        {/* ── About ── */}
         <TabsContent value="about" className="mt-6 space-y-6">
           <Card>
             <CardHeader>
@@ -271,27 +474,21 @@ export function SettingsPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Version</span>
-                <span>1.0.0</span>
-              </div>
-              <Separator />
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Electron</span>
-                <span>28.2.0</span>
-              </div>
-              <Separator />
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">React</span>
-                <span>18.2.0</span>
-              </div>
-              <Separator />
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Python Backend</span>
-                <span>3.11+</span>
-              </div>
-              <Separator />
-              <div className="pt-4">
+              {[
+                ['Version', '1.0.0'],
+                ['Electron', '28.2.0'],
+                ['React', '18.2.0'],
+                ['Python Backend', '3.11+'],
+              ].map(([label, value]) => (
+                <div key={label}>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">{label}</span>
+                    <span>{value}</span>
+                  </div>
+                  <Separator className="mt-4" />
+                </div>
+              ))}
+              <div className="pt-2">
                 <Button variant="outline" className="w-full">
                   Check for Updates
                 </Button>

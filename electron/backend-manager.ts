@@ -39,13 +39,20 @@ export class BackendManager {
     this.error = undefined
 
     try {
-      // Find available port
+      // In dev, use existing backend on default port if already running (e.g. Docker from make dev-electron)
+      if (this.isDev) {
+        const existing = await this.checkBackendAtPort(this.defaultPort)
+        if (existing) {
+          this.port = this.defaultPort
+          this.status = 'running'
+          this.startHealthCheckLoop()
+          return { success: true }
+        }
+      }
+
+      // Find available port and spawn our own backend
       this.port = await this.findAvailablePort(this.defaultPort)
-
-      // Start the backend process
       await this.spawnBackend()
-
-      // Wait for backend to be ready
       await this.waitForBackend()
 
       this.status = 'running'
@@ -61,6 +68,19 @@ export class BackendManager {
     }
   }
 
+  /** Check if a backend is already running at the given port (e.g. Docker). */
+  private async checkBackendAtPort(port: number): Promise<boolean> {
+    try {
+      const response = await fetch(`http://localhost:${port}${this.healthCheckPath}`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(2000),
+      })
+      return response.ok
+    } catch {
+      return false
+    }
+  }
+
   async stop(): Promise<{ success: boolean; error?: string }> {
     if (this.status === 'stopped') {
       return { success: true }
@@ -69,23 +89,22 @@ export class BackendManager {
     this.stopHealthCheckLoop()
     this.clearStartupTimeout()
 
-    if (this.process) {
+    const proc = this.process
+    if (proc) {
       return new Promise(resolve => {
         const forceKillTimeout = setTimeout(() => {
-          if (this.process) {
-            this.process.kill('SIGKILL')
-          }
+          proc.kill('SIGKILL')
           this.cleanup()
           resolve({ success: true })
         }, 5000)
 
-        this.process.once('exit', () => {
+        proc.once('exit', () => {
           clearTimeout(forceKillTimeout)
           this.cleanup()
           resolve({ success: true })
         })
 
-        this.process.kill('SIGTERM')
+        proc.kill('SIGTERM')
       })
     }
 
@@ -144,8 +163,10 @@ export class BackendManager {
     }
 
     if (this.isDev) {
-      // Development: run Python directly
-      this.process = spawn('python', ['-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', String(this.port)], {
+      // Development: use conda env testforge-env
+      const condaArgs = ['run', '-n', 'testforge-env', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', String(this.port)]
+      const condaCmd = process.platform === 'win32' ? 'conda.bat' : 'conda'
+      this.process = spawn(condaCmd, condaArgs, {
         cwd: backendPath,
         env,
         stdio: ['ignore', 'pipe', 'pipe'],

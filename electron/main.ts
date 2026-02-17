@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, shell, dialog, Notification } from 'electron'
+import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { BackendManager } from './backend-manager'
@@ -34,7 +35,7 @@ function createWindow() {
   })
 
   if (isDev) {
-    mainWindow.loadURL('http://localhost:5173')
+    mainWindow.loadURL('http://jluizgomes.local:5173')
     mainWindow.webContents.openDevTools()
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
@@ -140,6 +141,96 @@ function setupIpcHandlers() {
 
   ipcMain.handle('app:get-path', (_event, name: 'home' | 'appData' | 'userData' | 'temp' | 'logs') => {
     return app.getPath(name)
+  })
+
+  // File system — pre-scan project directory (25s deadline) for remote volume support
+  ipcMain.handle(
+    'fs:scan-project',
+    (_event, projectPath: string): Promise<Record<string, unknown>> => {
+      return new Promise((resolve) => {
+        const DEADLINE_MS = 25_000
+        const timer = setTimeout(() => resolve({ timeout: true, files: [], entry_points: [], total_files: 0 }), DEADLINE_MS)
+
+        try {
+          const SKIP_DIRS = new Set(['node_modules', '.git', '__pycache__', '.venv', 'venv', 'dist', 'build', '.next'])
+          const ENTRY_EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.java'])
+          const ROUTE_PATTERNS = [
+            /router\.(get|post|put|delete|patch)\s*\(/,
+            /export\s+default\s+function\s+\w+Page/,
+            /@router\.(get|post|put|delete|patch)\s*\(/,
+            /createBrowserRouter|<Route\s/,
+          ]
+
+          const files: Array<{ path: string; size: number; extension: string }> = []
+          const entry_points: string[] = []
+
+          function walk(dir: string, depth = 0) {
+            if (depth > 8) return
+            let entries: string[]
+            try {
+              entries = fs.readdirSync(dir)
+            } catch {
+              return
+            }
+            for (const entry of entries) {
+              if (SKIP_DIRS.has(entry)) continue
+              const full = path.join(dir, entry)
+              let stat: fs.Stats
+              try {
+                stat = fs.statSync(full)
+              } catch {
+                continue
+              }
+              const rel = path.relative(projectPath, full)
+              if (stat.isDirectory()) {
+                walk(full, depth + 1)
+              } else if (stat.isFile()) {
+                const ext = path.extname(entry)
+                files.push({ path: rel, size: stat.size, extension: ext })
+                if (ENTRY_EXTS.has(ext)) {
+                  try {
+                    const content = fs.readFileSync(full, 'utf-8').slice(0, 1000)
+                    if (ROUTE_PATTERNS.some((p) => p.test(content)) || content.includes('export default')) {
+                      entry_points.push(rel)
+                    }
+                  } catch { /* ignore */ }
+                }
+              }
+            }
+          }
+
+          walk(projectPath)
+          clearTimeout(timer)
+          resolve({ files, entry_points, total_files: files.length })
+        } catch (err) {
+          clearTimeout(timer)
+          resolve({ error: String(err), files: [], entry_points: [], total_files: 0 })
+        }
+      })
+    }
+  )
+
+  // File system — read .env / .env.local files from a project directory
+  ipcMain.handle('fs:read-env-file', (_event, projectPath: string): Record<string, string> => {
+    const candidates = ['.env.local', '.env']
+    for (const filename of candidates) {
+      const filePath = path.join(projectPath, filename)
+      if (fs.existsSync(filePath)) {
+        const content = fs.readFileSync(filePath, 'utf-8')
+        const vars: Record<string, string> = {}
+        for (const line of content.split('\n')) {
+          const trimmed = line.trim()
+          if (!trimmed || trimmed.startsWith('#')) continue
+          const eqIdx = trimmed.indexOf('=')
+          if (eqIdx === -1) continue
+          const key = trimmed.slice(0, eqIdx).trim()
+          const value = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, '')
+          if (key) vars[key] = value
+        }
+        return vars
+      }
+    }
+    return {}
   })
 
   // Notifications

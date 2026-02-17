@@ -5,6 +5,7 @@ import {
   Play,
   Network,
   Bot,
+  FileCode,
   FileText,
   Settings,
   ChevronLeft,
@@ -22,6 +23,7 @@ const navigation = [
   { name: 'Test Runner', href: '/test-runner', icon: Play },
   { name: 'Trace Explorer', href: '/traces', icon: Network },
   { name: 'AI Assistant', href: '/ai-assistant', icon: Bot },
+  { name: 'Test Editor', href: '/test-editor', icon: FileCode },
   { name: 'Reports', href: '/reports', icon: FileText },
 ]
 
@@ -40,12 +42,15 @@ export function Sidebar() {
     return location.pathname.startsWith(href)
   }
 
+  const isMacOS = typeof window !== 'undefined' && window.electronAPI?.platform === 'darwin'
+
   return (
     <TooltipProvider delayDuration={0}>
       <div
         className={cn(
           'fixed left-0 top-0 z-40 flex h-screen flex-col border-r bg-card transition-all duration-300',
-          sidebarCollapsed ? 'w-16' : 'w-64'
+          sidebarCollapsed ? 'w-16' : 'w-64',
+          isMacOS && 'pt-14' // Espaço para os traffic lights no macOS
         )}
       >
         {/* Logo */}

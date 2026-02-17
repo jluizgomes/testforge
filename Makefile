@@ -4,6 +4,7 @@
 .PHONY: help install install-frontend install-backend install-playwright \
         dev dev-frontend dev-backend dev-electron \
         build build-frontend build-backend build-electron \
+        backend-ready \
         test test-frontend test-backend test-e2e \
         lint lint-frontend lint-backend format format-backend \
         db-create db-migrate db-upgrade db-downgrade db-reset \
@@ -22,14 +23,16 @@ NC := \033[0m # No Color
 ROOT_DIR := $(shell pwd)
 BACKEND_DIR := $(ROOT_DIR)/backend
 FRONTEND_DIR := $(ROOT_DIR)
-VENV := $(BACKEND_DIR)/.venv
-PYTHON := $(VENV)/bin/python
+CONDA_ENV := testforge-env
+CONDA_RUN := conda run -n $(CONDA_ENV)
 UV := uv
 NPM := npm
 
-# Default ports
-BACKEND_PORT ?= 8000
+# Default ports (backend no Docker expõe 8100 no host)
+BACKEND_PORT ?= 8100
 FRONTEND_PORT ?= 5173
+# Skip backend health wait: SKIP_BACKEND_READY=1 make dev-electron
+SKIP_BACKEND_READY ?=
 
 # Default target
 .DEFAULT_GOAL := help
@@ -46,7 +49,12 @@ help: ## Display this help message
 
 ##@ Installation
 
-install: install-frontend install-backend install-playwright ## Install all dependencies
+conda-setup: ## Create conda env testforge-env (run once: conda create -n testforge-env python=3.12)
+	@echo "$(BLUE)Creating conda env $(CONDA_ENV)...$(NC)"
+	conda create -n $(CONDA_ENV) python=3.12 -y
+	@echo "$(GREEN)✓ Run: conda activate $(CONDA_ENV)$(NC)"
+
+install: install-frontend install-backend install-playwright ## Install all dependencies (requires conda env testforge-env)
 	@echo "$(GREEN)✓ All dependencies installed$(NC)"
 
 install-frontend: ## Install frontend (npm) dependencies
@@ -54,19 +62,19 @@ install-frontend: ## Install frontend (npm) dependencies
 	cd $(FRONTEND_DIR) && $(NPM) install
 	@echo "$(GREEN)✓ Frontend dependencies installed$(NC)"
 
-install-backend: ## Install backend (Python) dependencies
+install-backend: ## Install backend (Python) dependencies (requires: conda activate testforge-env)
 	@echo "$(BLUE)Installing backend dependencies...$(NC)"
-	cd $(BACKEND_DIR) && $(UV) pip install -e ".[dev]"
+	cd $(BACKEND_DIR) && $(CONDA_RUN) pip install -e ".[dev]"
 	@echo "$(GREEN)✓ Backend dependencies installed$(NC)"
 
 install-playwright: ## Install Playwright browsers
 	@echo "$(BLUE)Installing Playwright browsers...$(NC)"
-	cd $(BACKEND_DIR) && $(VENV)/bin/playwright install chromium
+	cd $(BACKEND_DIR) && $(CONDA_RUN) playwright install chromium
 	@echo "$(GREEN)✓ Playwright browsers installed$(NC)"
 
 install-playwright-all: ## Install all Playwright browsers (chromium, firefox, webkit)
 	@echo "$(BLUE)Installing all Playwright browsers...$(NC)"
-	cd $(BACKEND_DIR) && $(VENV)/bin/playwright install
+	cd $(BACKEND_DIR) && $(CONDA_RUN) playwright install
 	@echo "$(GREEN)✓ All Playwright browsers installed$(NC)"
 
 ##@ Development
@@ -91,9 +99,9 @@ dev-frontend: ## Run frontend development server (Vite)
 
 dev-backend: ## Run backend development server (FastAPI)
 	@echo "$(BLUE)Starting backend development server on port $(BACKEND_PORT)...$(NC)"
-	cd $(BACKEND_DIR) && $(VENV)/bin/uvicorn app.main:app --reload --port $(BACKEND_PORT)
+	cd $(BACKEND_DIR) && $(CONDA_RUN) uvicorn app.main:app --reload --port $(BACKEND_PORT)
 
-dev-electron: ## Run Electron app in development mode
+dev-electron: backend-ready ## Run Electron app in development mode (backend must be up)
 	@echo "$(BLUE)Starting Electron development mode...$(NC)"
 	cd $(FRONTEND_DIR) && $(NPM) run electron:dev
 
@@ -109,10 +117,10 @@ build-frontend: ## Build frontend for production
 
 build-backend: ## Build backend package
 	@echo "$(BLUE)Building backend...$(NC)"
-	cd $(BACKEND_DIR) && $(VENV)/bin/python -m build
+	cd $(BACKEND_DIR) && $(CONDA_RUN) python -m build
 	@echo "$(GREEN)✓ Backend build complete$(NC)"
 
-build-electron: ## Build Electron app for distribution
+build-electron: backend-ready ## Build Electron app for distribution (backend must be up)
 	@echo "$(BLUE)Building Electron app...$(NC)"
 	cd $(FRONTEND_DIR) && $(NPM) run electron:build
 	@echo "$(GREEN)✓ Electron build complete$(NC)"
@@ -147,15 +155,15 @@ test-frontend-watch: ## Run frontend tests in watch mode
 
 test-backend: ## Run backend tests (pytest)
 	@echo "$(BLUE)Running backend tests...$(NC)"
-	cd $(BACKEND_DIR) && $(VENV)/bin/pytest
+	cd $(BACKEND_DIR) && $(CONDA_RUN) pytest
 
 test-backend-cov: ## Run backend tests with coverage
 	@echo "$(BLUE)Running backend tests with coverage...$(NC)"
-	cd $(BACKEND_DIR) && $(VENV)/bin/pytest --cov=app --cov-report=html --cov-report=term-missing
+	cd $(BACKEND_DIR) && $(CONDA_RUN) pytest --cov=app --cov-report=html --cov-report=term-missing
 
 test-e2e: ## Run E2E tests (Playwright)
 	@echo "$(BLUE)Running E2E tests...$(NC)"
-	cd $(BACKEND_DIR) && $(VENV)/bin/pytest tests/e2e -v
+	cd $(BACKEND_DIR) && $(CONDA_RUN) pytest tests/e2e -v
 
 ##@ Code Quality
 
@@ -168,7 +176,7 @@ lint-frontend: ## Lint frontend code (ESLint)
 
 lint-backend: ## Lint backend code (Ruff)
 	@echo "$(BLUE)Linting backend...$(NC)"
-	cd $(BACKEND_DIR) && $(VENV)/bin/ruff check app
+	cd $(BACKEND_DIR) && $(CONDA_RUN) ruff check app
 
 format: format-frontend format-backend ## Format all code
 	@echo "$(GREEN)✓ Formatting complete$(NC)"
@@ -179,8 +187,8 @@ format-frontend: ## Format frontend code (Prettier)
 
 format-backend: ## Format backend code (Black + Ruff)
 	@echo "$(BLUE)Formatting backend...$(NC)"
-	cd $(BACKEND_DIR) && $(VENV)/bin/ruff check --fix app
-	cd $(BACKEND_DIR) && $(VENV)/bin/black app
+	cd $(BACKEND_DIR) && $(CONDA_RUN) ruff check --fix app
+	cd $(BACKEND_DIR) && $(CONDA_RUN) black app
 
 typecheck: typecheck-frontend typecheck-backend ## Run type checking
 	@echo "$(GREEN)✓ Type checking complete$(NC)"
@@ -191,63 +199,76 @@ typecheck-frontend: ## Type check frontend (TypeScript)
 
 typecheck-backend: ## Type check backend (mypy)
 	@echo "$(BLUE)Type checking backend...$(NC)"
-	cd $(BACKEND_DIR) && $(VENV)/bin/mypy app
+	cd $(BACKEND_DIR) && $(CONDA_RUN) mypy app
 
 ##@ Database
 
-db-create: ## Create the database (requires PostgreSQL running)
+db-create: ## Create the database (requires PostgreSQL running via make docker-up)
 	@echo "$(BLUE)Creating database...$(NC)"
-	docker exec core-postgres psql -U postgres -c "CREATE DATABASE testforge;" 2>/dev/null || echo "$(YELLOW)Database may already exist$(NC)"
+	docker exec testforge-postgres psql -U postgres -c "CREATE DATABASE testforge;" 2>/dev/null || echo "$(YELLOW)Database may already exist$(NC)"
 	@echo "$(GREEN)✓ Database ready$(NC)"
 
 db-migrate: ## Create a new migration (usage: make db-migrate MSG="migration message")
 	@echo "$(BLUE)Creating migration...$(NC)"
-	cd $(BACKEND_DIR) && $(VENV)/bin/alembic revision --autogenerate -m "$(MSG)"
+	cd $(BACKEND_DIR) && $(CONDA_RUN) alembic revision --autogenerate -m "$(MSG)"
 	@echo "$(GREEN)✓ Migration created$(NC)"
 
 db-upgrade: ## Apply all pending migrations
 	@echo "$(BLUE)Applying migrations...$(NC)"
-	cd $(BACKEND_DIR) && $(VENV)/bin/alembic upgrade head
+	cd $(BACKEND_DIR) && $(CONDA_RUN) alembic upgrade head
 	@echo "$(GREEN)✓ Migrations applied$(NC)"
 
 db-downgrade: ## Rollback last migration
 	@echo "$(BLUE)Rolling back last migration...$(NC)"
-	cd $(BACKEND_DIR) && $(VENV)/bin/alembic downgrade -1
+	cd $(BACKEND_DIR) && $(CONDA_RUN) alembic downgrade -1
 	@echo "$(GREEN)✓ Rollback complete$(NC)"
 
 db-reset: ## Reset database (drop all tables and re-apply migrations)
 	@echo "$(RED)Resetting database...$(NC)"
-	docker exec core-postgres psql -U postgres -c "DROP DATABASE IF EXISTS testforge;"
-	docker exec core-postgres psql -U postgres -c "CREATE DATABASE testforge;"
-	cd $(BACKEND_DIR) && $(VENV)/bin/alembic upgrade head
+	docker exec testforge-postgres psql -U postgres -c "DROP DATABASE IF EXISTS testforge;"
+	docker exec testforge-postgres psql -U postgres -c "CREATE DATABASE testforge;"
+	cd $(BACKEND_DIR) && $(CONDA_RUN) alembic upgrade head
 	@echo "$(GREEN)✓ Database reset complete$(NC)"
 
 db-shell: ## Open PostgreSQL shell
 	@echo "$(BLUE)Opening database shell...$(NC)"
-	docker exec -it core-postgres psql -U postgres -d testforge
+	docker exec -it testforge-postgres psql -U postgres -d testforge
 
 db-status: ## Show current migration status
 	@echo "$(BLUE)Migration status:$(NC)"
-	cd $(BACKEND_DIR) && $(VENV)/bin/alembic current
+	cd $(BACKEND_DIR) && $(CONDA_RUN) alembic current
 
 db-history: ## Show migration history
 	@echo "$(BLUE)Migration history:$(NC)"
-	cd $(BACKEND_DIR) && $(VENV)/bin/alembic history
+	cd $(BACKEND_DIR) && $(CONDA_RUN) alembic history
 
-##@ Docker (Infrastructure)
+##@ Docker (Infrastructure - local PostgreSQL na porta 5434)
 
-docker-up: ## Start infrastructure services (PostgreSQL, Redis, Jaeger)
-	@echo "$(BLUE)Starting infrastructure services...$(NC)"
-	cd ~/Documents/Projetos/infra-core && docker-compose up -d
-	@echo "$(GREEN)✓ Infrastructure services started$(NC)"
+docker-up: ## Start PostgreSQL + Backend (porta 5434, backend em 8100)
+	@echo "$(BLUE)Starting PostgreSQL and Backend...$(NC)"
+	cd $(ROOT_DIR) && docker compose up -d
+	@echo "$(GREEN)✓ Services started$(NC)"
 
-docker-down: ## Stop infrastructure services
-	@echo "$(BLUE)Stopping infrastructure services...$(NC)"
-	cd ~/Documents/Projetos/infra-core && docker-compose down
-	@echo "$(GREEN)✓ Infrastructure services stopped$(NC)"
+backend-ready: docker-up ## Garante backend online (Docker) antes de rodar/build Electron
+	@if [ -n "$(SKIP_BACKEND_READY)" ]; then \
+		echo "$(YELLOW)Skipping backend wait (SKIP_BACKEND_READY=1)$(NC)"; exit 0; \
+	fi; \
+	echo "$(BLUE)Waiting for backend on port $(BACKEND_PORT)...$(NC)"; \
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do \
+		curl -sf --connect-timeout 2 "http://127.0.0.1:$(BACKEND_PORT)/health" >/dev/null 2>&1 && { echo "$(GREEN)✓ Backend is ready$(NC)"; exit 0; }; \
+		sleep 2; \
+	done; \
+	echo "$(RED)Backend did not become ready in time.$(NC)"; \
+	echo "  Check: docker compose logs backend  (backend needs core-postgres and core-redis on core_net)"; \
+	echo "  Or run: SKIP_BACKEND_READY=1 make dev-electron"; exit 1
 
-docker-logs: ## Show infrastructure service logs
-	cd ~/Documents/Projetos/infra-core && docker-compose logs -f
+docker-down: ## Stop PostgreSQL local
+	@echo "$(BLUE)Stopping local PostgreSQL...$(NC)"
+	cd $(ROOT_DIR) && docker compose down
+	@echo "$(GREEN)✓ PostgreSQL stopped$(NC)"
+
+docker-logs: ## Show PostgreSQL logs
+	cd $(ROOT_DIR) && docker compose logs -f
 
 docker-ps: ## Show running containers
 	docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
@@ -260,22 +281,22 @@ check: ## Check project dependencies and status
 	@echo "$(YELLOW)Node.js:$(NC)"
 	@node --version 2>/dev/null || echo "  $(RED)✗ Node.js not found$(NC)"
 	@echo ""
-	@echo "$(YELLOW)Python:$(NC)"
-	@$(PYTHON) --version 2>/dev/null || echo "  $(RED)✗ Python venv not found$(NC)"
+	@echo "$(YELLOW)Python (conda $(CONDA_ENV)):$(NC)"
+	@$(CONDA_RUN) python --version 2>/dev/null || echo "  $(RED)✗ Conda env $(CONDA_ENV) not found. Create: conda create -n $(CONDA_ENV) python=3.12$(NC)"
 	@echo ""
 	@echo "$(YELLOW)Docker containers:$(NC)"
 	@docker ps --format "  {{.Names}}: {{.Status}}" 2>/dev/null || echo "  $(RED)✗ Docker not running$(NC)"
 	@echo ""
 	@echo "$(YELLOW)Database:$(NC)"
-	@docker exec core-postgres psql -U postgres -d testforge -c "SELECT 1;" >/dev/null 2>&1 && echo "  $(GREEN)✓ PostgreSQL connected$(NC)" || echo "  $(RED)✗ PostgreSQL not available$(NC)"
+	@docker exec testforge-postgres psql -U postgres -d testforge -c "SELECT 1;" >/dev/null 2>&1 && echo "  $(GREEN)✓ PostgreSQL connected$(NC)" || echo "  $(RED)✗ PostgreSQL not available$(NC)"
 
 health: ## Check backend health endpoint
 	@echo "$(BLUE)Checking backend health...$(NC)"
-	@curl -s http://localhost:$(BACKEND_PORT)/health 2>/dev/null && echo "" || echo "$(RED)Backend not responding on port $(BACKEND_PORT)$(NC)"
+	@curl -s http://jluizgomes.local:$(BACKEND_PORT)/health 2>/dev/null && echo "" || echo "$(RED)Backend not responding on port $(BACKEND_PORT)$(NC)"
 
 api-docs: ## Open API documentation in browser
 	@echo "$(BLUE)Opening API documentation...$(NC)"
-	@xdg-open http://localhost:$(BACKEND_PORT)/docs 2>/dev/null || open http://localhost:$(BACKEND_PORT)/docs 2>/dev/null || echo "Open http://localhost:$(BACKEND_PORT)/docs in your browser"
+	@xdg-open http://jluizgomes.local:$(BACKEND_PORT)/docs 2>/dev/null || open http://jluizgomes.local:$(BACKEND_PORT)/docs 2>/dev/null || echo "Open http://jluizgomes.local:$(BACKEND_PORT)/docs in your browser"
 
 ##@ Cleanup
 
@@ -296,10 +317,9 @@ clean-backend: ## Clean backend build artifacts
 	find $(BACKEND_DIR) -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find $(BACKEND_DIR) -type f -name "*.pyc" -delete 2>/dev/null || true
 
-clean-all: clean ## Clean everything including dependencies
+clean-all: clean ## Clean everything including node_modules (conda env preserved)
 	@echo "$(BLUE)Cleaning all dependencies...$(NC)"
 	rm -rf $(FRONTEND_DIR)/node_modules
-	rm -rf $(BACKEND_DIR)/.venv
 	@echo "$(GREEN)✓ Full cleanup complete$(NC)"
 
 ##@ AI & RAG
@@ -335,7 +355,7 @@ setup: docker-up install db-create db-upgrade ## Complete project setup (first t
 	@echo "  make dev-electron"
 	@echo ""
 	@echo "$(YELLOW)API Documentation:$(NC)"
-	@echo "  http://localhost:$(BACKEND_PORT)/docs"
+	@echo "  http://jluizgomes.local:$(BACKEND_PORT)/docs"
 	@echo ""
 
 quickstart: setup dev-tmux ## Setup and start development (requires tmux)

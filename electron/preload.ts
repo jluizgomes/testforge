@@ -48,6 +48,12 @@ const fileApi = {
 
   selectFile: (options?: { filters?: FileFilter[], title?: string }): Promise<string | null> =>
     ipcRenderer.invoke('file:select-file', options || {}),
+
+  readEnvFile: (projectPath: string): Promise<Record<string, string>> =>
+    ipcRenderer.invoke('fs:read-env-file', projectPath),
+
+  scanProject: (projectPath: string): Promise<Record<string, unknown>> =>
+    ipcRenderer.invoke('fs:scan-project', projectPath),
 }
 
 // Shell API
@@ -99,5 +105,6 @@ declare global {
       platform: NodeJS.Platform
       isElectron: boolean
     }
+    // Allow accessing file.readEnvFile in non-Electron environments (returns empty)
   }
 }

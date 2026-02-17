@@ -109,7 +109,7 @@ export const useAppStore = create<AppState>()(
         } else {
           // Development mode without Electron
           set({
-            backendUrl: 'http://localhost:8000',
+            backendUrl: 'http://jluizgomes.local:8000',
             backendStatus: { status: 'running', port: 8000 },
           })
         }

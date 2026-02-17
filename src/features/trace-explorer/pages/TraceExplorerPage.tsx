@@ -93,6 +93,171 @@ const mockTraces = [
   { id: '4', name: 'API Health Check', duration: 120, status: 'ok', timestamp: '14:30:15' },
 ]
 
+// ── Flame Graph ─────────────────────────────────────────────────────────────
+
+interface FlatSpan {
+  span: SpanData
+  depth: number
+}
+
+function flattenSpans(span: SpanData, depth = 0): FlatSpan[] {
+  const result: FlatSpan[] = [{ span, depth }]
+  if (span.children) {
+    for (const child of span.children) {
+      result.push(...flattenSpans(child, depth + 1))
+    }
+  }
+  return result
+}
+
+const SERVICE_COLORS: Record<string, string> = {
+  'e2e-test': '#3b82f6',
+  'playwright': '#8b5cf6',
+  'backend': '#22c55e',
+  'database': '#f59e0b',
+  'redis': '#ef4444',
+}
+
+function getServiceColor(service: string): string {
+  return SERVICE_COLORS[service] ?? '#64748b'
+}
+
+interface TooltipState {
+  span: SpanData
+  x: number
+  y: number
+}
+
+interface FlameGraphProps {
+  rootSpan: SpanData
+  selectedSpanId?: string
+  onSpanClick?: (span: SpanData) => void
+}
+
+function FlameGraph({ rootSpan, selectedSpanId, onSpanClick }: FlameGraphProps) {
+  const [tooltip, setTooltip] = useState<TooltipState | null>(null)
+
+  const flat = flattenSpans(rootSpan)
+  const maxDepth = Math.max(...flat.map(f => f.depth))
+  const totalDuration = rootSpan.duration
+
+  const ROW_H = 26
+  const ROW_GAP = 3
+  const PADDING = 4
+  const totalHeight = (maxDepth + 1) * (ROW_H + ROW_GAP) + PADDING * 2
+
+  const pctLeft = (offset: number) => (offset / totalDuration) * 100
+  const pctWidth = (duration: number) =>
+    Math.max((duration / totalDuration) * 100, 0.3)
+
+  return (
+    <div className="select-none">
+      {/* Legend */}
+      <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1">
+        {Object.entries(SERVICE_COLORS).map(([svc, color]) => (
+          <div key={svc} className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <div className="h-3 w-3 rounded-sm" style={{ backgroundColor: color }} />
+            {svc}
+          </div>
+        ))}
+      </div>
+
+      {/* Ruler */}
+      <div className="mb-1 flex justify-between text-[10px] text-muted-foreground">
+        <span>0ms</span>
+        <span>{Math.round(totalDuration * 0.25)}ms</span>
+        <span>{Math.round(totalDuration * 0.5)}ms</span>
+        <span>{Math.round(totalDuration * 0.75)}ms</span>
+        <span>{totalDuration}ms</span>
+      </div>
+
+      {/* Canvas */}
+      <div
+        className="relative rounded border bg-muted/20"
+        style={{ height: `${totalHeight}px` }}
+        onMouseLeave={() => setTooltip(null)}
+      >
+        {flat.map(({ span, depth }) => {
+          const left = pctLeft(span.startOffset)
+          const width = pctWidth(span.duration)
+          const top = PADDING + depth * (ROW_H + ROW_GAP)
+          const color = span.status === 'error' ? '#ef4444' : getServiceColor(span.service)
+          const isSelected = selectedSpanId === span.id
+
+          return (
+            <div
+              key={span.id}
+              className={cn(
+                'absolute flex cursor-pointer items-center overflow-hidden rounded-sm px-1 transition-all',
+                'hover:brightness-110',
+                isSelected && 'ring-2 ring-white ring-offset-1',
+              )}
+              style={{
+                left: `${left}%`,
+                width: `${width}%`,
+                top: `${top}px`,
+                height: `${ROW_H}px`,
+                backgroundColor: color,
+                minWidth: '4px',
+              }}
+              onClick={() => onSpanClick?.(span)}
+              onMouseEnter={(e) => {
+                const container = e.currentTarget.closest('.relative') as HTMLElement
+                const rect = container.getBoundingClientRect()
+                setTooltip({
+                  span,
+                  x: e.clientX - rect.left,
+                  y: top,
+                })
+              }}
+            >
+              {width > 6 && (
+                <span className="truncate text-[10px] font-medium leading-none text-white drop-shadow">
+                  {span.name}
+                </span>
+              )}
+            </div>
+          )
+        })}
+
+        {/* Tooltip */}
+        {tooltip && (() => {
+          const belowY = tooltip.y + ROW_H + 6
+          const useBelow = belowY + 72 < totalHeight
+          return (
+            <div
+              className="pointer-events-none absolute z-20 min-w-[160px] rounded-md border bg-popover px-3 py-2 text-xs shadow-lg"
+              style={{
+                left: Math.min(tooltip.x + 12, 65) + '%',
+                top: useBelow ? `${belowY}px` : `${tooltip.y - 72}px`,
+              }}
+            >
+              <p className="font-semibold leading-tight">{tooltip.span.name}</p>
+              <p className="text-muted-foreground">{tooltip.span.service}</p>
+              <div className="mt-1.5 flex justify-between gap-4">
+                <span>{tooltip.span.duration}ms</span>
+                <span
+                  className={
+                    tooltip.span.status === 'ok' ? 'text-green-500' : 'text-red-500'
+                  }
+                >
+                  {tooltip.span.status}
+                </span>
+              </div>
+            </div>
+          )
+        })()}
+      </div>
+
+      <p className="mt-2 text-center text-xs text-muted-foreground">
+        Click a span to see details below
+      </p>
+    </div>
+  )
+}
+
+// ── Main page ────────────────────────────────────────────────────────────────
+
 export function TraceExplorerPage() {
   const [selectedTrace, setSelectedTrace] = useState<string | null>('1')
   const [selectedSpan, setSelectedSpan] = useState<SpanData | null>(null)
@@ -236,9 +401,11 @@ export function TraceExplorerPage() {
               </TabsContent>
 
               <TabsContent value="flamegraph" className="mt-4">
-                <div className="flex h-[400px] items-center justify-center text-muted-foreground">
-                  Flame graph visualization coming soon
-                </div>
+                <FlameGraph
+                  rootSpan={mockTrace}
+                  selectedSpanId={selectedSpan?.id}
+                  onSpanClick={setSelectedSpan}
+                />
               </TabsContent>
 
               <TabsContent value="json" className="mt-4">
@@ -275,6 +442,12 @@ export function TraceExplorerPage() {
               </div>
               <div>
                 <label className="text-sm font-medium text-muted-foreground">
+                  Start Offset
+                </label>
+                <p className="mt-1">{selectedSpan.startOffset}ms</p>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-muted-foreground">
                   Status
                 </label>
                 <p className="mt-1">
@@ -282,12 +455,6 @@ export function TraceExplorerPage() {
                     {selectedSpan.status}
                   </Badge>
                 </p>
-              </div>
-              <div>
-                <label className="text-sm font-medium text-muted-foreground">
-                  Span ID
-                </label>
-                <p className="mt-1 font-mono text-sm">{selectedSpan.id}</p>
               </div>
             </div>
           </CardContent>

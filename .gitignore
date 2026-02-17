@@ -13,6 +13,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+# Allow frontend src/lib (tracked source code, not a build artifact)
+!src/lib/
 parts/
 sdist/
 var/
@@ -29,8 +31,6 @@ backend-dist/
 .env
 .env.local
 .env.*.local
-.venv/
-venv/
 ENV/
 
 # IDE

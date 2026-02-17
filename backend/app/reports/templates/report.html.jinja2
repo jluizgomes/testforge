@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TestForge AI — Test Report</title>
+  <style>
+    /* ── Reset & base ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.6;
+      background: #f1f5f9;
+      color: #1e293b;
+    }
+    a { color: #3b82f6; text-decoration: none; }
+
+    /* ── Layout ── */
+    .page { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+
+    /* ── Header ── */
+    .header {
+      background: linear-gradient(135deg, #1d4ed8 0%, #0ea5e9 100%);
+      color: #fff;
+      border-radius: 14px;
+      padding: 2rem 2.5rem;
+      margin-bottom: 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+    .header h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; }
+    .header .meta { font-size: 0.8rem; opacity: 0.85; margin-top: 0.25rem; }
+    .header .meta span { display: block; }
+    .badge-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.4rem 1rem;
+      border-radius: 999px;
+      font-weight: 600;
+      font-size: 0.85rem;
+    }
+    .badge-passed  { background: #dcfce7; color: #166534; }
+    .badge-failed  { background: #fee2e2; color: #991b1b; }
+    .badge-running { background: #dbeafe; color: #1e40af; }
+    .badge-pending { background: #f3f4f6; color: #374151; }
+    .badge-error   { background: #fef3c7; color: #92400e; }
+
+    /* ── Summary cards ── */
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+    .card {
+      background: #fff;
+      border-radius: 10px;
+      padding: 1.25rem 1.5rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,.07);
+    }
+    .card-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: #64748b;
+      margin-bottom: 0.4rem;
+    }
+    .card-value {
+      font-size: 2rem;
+      font-weight: 700;
+      line-height: 1.1;
+    }
+    .card-value.passed  { color: #22c55e; }
+    .card-value.failed  { color: #ef4444; }
+    .card-value.skipped { color: #eab308; }
+    .card-value.neutral { color: #3b82f6; }
+
+    /* Health score ring */
+    .health-ring {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      font-weight: 700;
+      font-size: 1.1rem;
+    }
+    .health-good    { background: #dcfce7; color: #166534; }
+    .health-warning { background: #fef3c7; color: #92400e; }
+    .health-bad     { background: #fee2e2; color: #991b1b; }
+
+    /* ── Section ── */
+    .section {
+      background: #fff;
+      border-radius: 10px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,.07);
+    }
+    .section-title {
+      font-size: 1rem;
+      font-weight: 700;
+      color: #0f172a;
+      margin-bottom: 1rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 2px solid #e2e8f0;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .section-title .count {
+      margin-left: auto;
+      font-size: 0.75rem;
+      font-weight: 600;
+      background: #f1f5f9;
+      color: #64748b;
+      padding: 0.15rem 0.5rem;
+      border-radius: 999px;
+    }
+
+    /* ── Progress bar ── */
+    .progress-bar {
+      height: 8px;
+      background: #e2e8f0;
+      border-radius: 4px;
+      overflow: hidden;
+      margin-top: 0.5rem;
+    }
+    .progress-fill {
+      height: 100%;
+      border-radius: 4px;
+      background: linear-gradient(90deg, #22c55e, #16a34a);
+      transition: width .4s ease;
+    }
+    .progress-fill.bad { background: linear-gradient(90deg, #f87171, #ef4444); }
+
+    /* ── Layer tabs ── */
+    .layer-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+    }
+    .layer-card {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 1rem;
+    }
+    .layer-card h4 {
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: capitalize;
+      color: #64748b;
+      margin-bottom: 0.5rem;
+    }
+    .layer-stat { display: flex; justify-content: space-between; font-size: 0.8rem; }
+
+    /* ── Results table ── */
+    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    th {
+      text-align: left;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      color: #64748b;
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid #e2e8f0;
+      white-space: nowrap;
+    }
+    td {
+      padding: 0.6rem 0.75rem;
+      border-bottom: 1px solid #f1f5f9;
+      vertical-align: middle;
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #f8fafc; }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.15rem 0.6rem;
+      border-radius: 999px;
+      font-size: 0.7rem;
+      font-weight: 600;
+    }
+    .status-passed  { background: #dcfce7; color: #166534; }
+    .status-failed  { background: #fee2e2; color: #991b1b; }
+    .status-skipped { background: #f3f4f6; color: #374151; }
+    .status-error   { background: #fef3c7; color: #92400e; }
+    .status-running { background: #dbeafe; color: #1e40af; }
+    .status-unknown { background: #f3f4f6; color: #6b7280; }
+
+    /* ── Failures ── */
+    .failure-block {
+      border-left: 4px solid #ef4444;
+      background: #fff5f5;
+      border-radius: 0 8px 8px 0;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1rem;
+    }
+    .failure-block h4 { font-size: 0.9rem; font-weight: 600; color: #1e293b; margin-bottom: 0.25rem; }
+    .failure-meta { font-size: 0.75rem; color: #64748b; margin-bottom: 0.5rem; }
+    .failure-error {
+      background: #1e293b;
+      color: #f1f5f9;
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      font-family: "Fira Code", "Cascadia Code", Consolas, monospace;
+      font-size: 0.75rem;
+      white-space: pre-wrap;
+      word-break: break-all;
+      overflow-x: auto;
+      margin-top: 0.5rem;
+    }
+
+    /* ── Performance ── */
+    .perf-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
+    .perf-name { flex: 1; font-size: 0.8rem; color: #374151; }
+    .perf-bar-wrap { flex: 2; background: #e2e8f0; border-radius: 4px; height: 6px; overflow: hidden; }
+    .perf-bar-fill { height: 100%; border-radius: 4px; background: #3b82f6; }
+    .perf-ms { font-size: 0.75rem; color: #64748b; white-space: nowrap; }
+
+    /* ── Recommendations ── */
+    .rec-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.6rem;
+      padding: 0.6rem 0;
+      border-bottom: 1px solid #f1f5f9;
+    }
+    .rec-item:last-child { border-bottom: none; }
+    .rec-icon { font-size: 1rem; flex-shrink: 0; margin-top: 0.05rem; }
+    .rec-text { font-size: 0.85rem; color: #334155; }
+
+    /* ── Footer ── */
+    .footer {
+      margin-top: 2rem;
+      text-align: center;
+      font-size: 0.75rem;
+      color: #94a3b8;
+    }
+
+    /* ── Print ── */
+    @media print {
+      body { background: #fff; }
+      .page { max-width: 100%; padding: 1rem; }
+      .header { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ═══════════════ HEADER ═══════════════ -->
+  <div class="header">
+    <div>
+      <h1>Test Report</h1>
+      <div class="meta">
+        <span>Run ID: {{ metadata.test_run_id }}</span>
+        <span>Generated: {{ metadata.generated_at | format_datetime }}</span>
+        {% if metadata.started_at %}
+        <span>Started: {{ metadata.started_at | format_datetime }}</span>
+        {% endif %}
+        {% if metadata.completed_at %}
+        <span>Completed: {{ metadata.completed_at | format_datetime }}</span>
+        {% endif %}
+      </div>
+    </div>
+    <div>
+      {% set st = summary.status | lower %}
+      <span class="badge-status badge-{{ st }}">
+        {% if st == 'passed' %}✅{% elif st == 'failed' %}❌{% elif st == 'running' %}⏳{% else %}⬜{% endif %}
+        {{ summary.status | upper }}
+      </span>
+    </div>
+  </div>
+
+  <!-- ═══════════════ SUMMARY CARDS ═══════════════ -->
+  <div class="summary-grid">
+    <div class="card">
+      <div class="card-label">Total Tests</div>
+      <div class="card-value neutral">{{ summary.total_tests }}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Passed</div>
+      <div class="card-value passed">{{ summary.passed }}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Failed</div>
+      <div class="card-value failed">{{ summary.failed }}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Skipped</div>
+      <div class="card-value skipped">{{ summary.skipped }}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Pass Rate</div>
+      <div class="card-value {% if summary.pass_rate >= 80 %}passed{% elif summary.pass_rate >= 60 %}skipped{% else %}failed{% endif %}">
+        {{ summary.pass_rate }}%
+      </div>
+      <div class="progress-bar" style="margin-top:.75rem">
+        <div class="progress-fill {% if summary.pass_rate < 60 %}bad{% endif %}" style="width:{{ summary.pass_rate }}%"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-label">Duration</div>
+      <div class="card-value neutral" style="font-size:1.4rem">{{ summary.duration_ms | format_duration }}</div>
+    </div>
+    <div class="card" style="display:flex;align-items:center;gap:1rem">
+      <div>
+        <div class="card-label">Health Score</div>
+        <div style="font-size:.8rem;color:#64748b;margin-top:.25rem">
+          {% if summary.health_score >= 80 %}Excellent{% elif summary.health_score >= 60 %}Fair{% else %}Poor{% endif %}
+        </div>
+      </div>
+      <div class="health-ring {% if summary.health_score >= 80 %}health-good{% elif summary.health_score >= 60 %}health-warning{% else %}health-bad{% endif %}">
+        {{ summary.health_score }}
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════ RESULTS BY LAYER ═══════════════ -->
+  <div class="section">
+    <div class="section-title">Results by Layer</div>
+    <div class="layer-grid">
+      {% for layer_name, layer_results in results_by_layer.items() %}
+      {% if layer_results %}
+      {% set lp = layer_results | selectattr("status", "equalto", "passed") | list | length %}
+      {% set lf = layer_results | selectattr("status", "in", ["failed", "error"]) | list | length %}
+      <div class="layer-card">
+        <h4>{{ layer_name }}</h4>
+        <div class="layer-stat"><span>Total</span><strong>{{ layer_results | length }}</strong></div>
+        <div class="layer-stat"><span style="color:#22c55e">Passed</span><strong>{{ lp }}</strong></div>
+        <div class="layer-stat"><span style="color:#ef4444">Failed</span><strong>{{ lf }}</strong></div>
+        <div class="progress-bar" style="margin-top:.5rem">
+          <div class="progress-fill {% if (lp / (layer_results|length) * 100) < 60 %}bad{% endif %}"
+               style="width:{{ (lp / (layer_results|length) * 100) | int }}%"></div>
+        </div>
+      </div>
+      {% endif %}
+      {% endfor %}
+    </div>
+
+    <!-- Detail table per layer -->
+    {% for layer_name, layer_results in results_by_layer.items() %}
+    {% if layer_results %}
+    <details style="margin-bottom:.75rem">
+      <summary style="cursor:pointer;font-weight:600;font-size:.85rem;padding:.4rem 0;color:#334155">
+        {{ layer_name | capitalize }} ({{ layer_results | length }} tests)
+      </summary>
+      <table style="margin-top:.5rem">
+        <thead>
+          <tr>
+            <th>Test Name</th>
+            <th>Status</th>
+            <th>Duration</th>
+            <th>File</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in layer_results %}
+          <tr>
+            <td>{{ r.test_name }}</td>
+            <td>
+              <span class="status-pill {{ r.status | status_class }}">{{ r.status }}</span>
+            </td>
+            <td>{{ r.duration_ms | format_duration }}</td>
+            <td style="color:#64748b;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+              {{ r.test_file or "—" }}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </details>
+    {% endif %}
+    {% endfor %}
+  </div>
+
+  <!-- ═══════════════ FAILURES ═══════════════ -->
+  {% if failures %}
+  <div class="section">
+    <div class="section-title">
+      Failures
+      <span class="count">{{ failures | length }}</span>
+    </div>
+    {% for f in failures %}
+    <div class="failure-block">
+      <h4>{{ f.test_name }}</h4>
+      <div class="failure-meta">
+        {% if f.test_file %}<span>📄 {{ f.test_file }}</span> · {% endif %}
+        {% if f.test_layer %}<span>Layer: {{ f.test_layer }}</span> · {% endif %}
+        {% if f.duration_ms %}<span>⏱ {{ f.duration_ms | format_duration }}</span>{% endif %}
+      </div>
+      {% if f.error_message %}
+      <div class="failure-error">{{ f.error_message }}{% if f.error_stack %}
+
+{{ f.error_stack }}{% endif %}</div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- ═══════════════ PERFORMANCE ═══════════════ -->
+  {% if performance and performance.slowest_tests %}
+  <div class="section">
+    <div class="section-title">Performance</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;flex-wrap:wrap">
+      <div>
+        <div style="font-size:.8rem;font-weight:600;color:#64748b;margin-bottom:.75rem;text-transform:uppercase">Slowest Tests</div>
+        {% set max_ms = performance.slowest_tests[0].duration_ms if performance.slowest_tests else 1 %}
+        {% for t in performance.slowest_tests %}
+        <div class="perf-row">
+          <div class="perf-name">{{ t.name or "Unknown" }}</div>
+          <div class="perf-bar-wrap">
+            <div class="perf-bar-fill" style="width:{{ ((t.duration_ms or 0) / (max_ms or 1) * 100) | int }}%"></div>
+          </div>
+          <div class="perf-ms">{{ t.duration_ms | format_duration }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      <div>
+        <div style="font-size:.8rem;font-weight:600;color:#64748b;margin-bottom:.75rem;text-transform:uppercase">Stats</div>
+        <div class="layer-stat" style="margin-bottom:.4rem"><span>Avg Duration</span><strong>{{ performance.avg_duration_ms | format_duration }}</strong></div>
+        <div class="layer-stat"><span>Total Duration</span><strong>{{ performance.total_duration_ms | format_duration }}</strong></div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- ═══════════════ AI ANALYSIS ═══════════════ -->
+  {% if ai_analysis %}
+  <div class="section">
+    <div class="section-title">AI Analysis</div>
+    {% if ai_analysis.summary %}
+    <p style="color:#334155;margin-bottom:1rem">{{ ai_analysis.summary }}</p>
+    {% endif %}
+    {% if ai_analysis.root_causes %}
+    <div style="font-size:.8rem;font-weight:600;color:#64748b;margin-bottom:.5rem;text-transform:uppercase">Root Causes</div>
+    <ul style="margin:0 0 1rem 1.25rem">
+      {% for rc in ai_analysis.root_causes %}<li>{{ rc }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <!-- ═══════════════ RECOMMENDATIONS ═══════════════ -->
+  {% if recommendations %}
+  <div class="section">
+    <div class="section-title">Recommendations</div>
+    {% for rec in recommendations %}
+    <div class="rec-item">
+      <span class="rec-icon">💡</span>
+      <span class="rec-text">{{ rec }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- ═══════════════ FOOTER ═══════════════ -->
+  <div class="footer">
+    Generated by <strong>TestForge AI</strong> · {{ metadata.generated_at | format_datetime }}
+  </div>
+
+</div>
+</body>
+</html>
