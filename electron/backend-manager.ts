@@ -71,9 +71,9 @@ export class BackendManager {
   /** Check if a backend is already running at the given port (e.g. Docker). */
   private async checkBackendAtPort(port: number): Promise<boolean> {
     try {
-      const response = await fetch(`http://localhost:${port}${this.healthCheckPath}`, {
+      const response = await fetch(`http://127.0.0.1:${port}${this.healthCheckPath}`, {
         method: 'GET',
-        signal: AbortSignal.timeout(2000),
+        signal: AbortSignal.timeout(5000),
       })
       return response.ok
     } catch {
@@ -136,7 +136,7 @@ export class BackendManager {
     const startTime = Date.now()
 
     try {
-      const response = await fetch(`http://localhost:${this.port}${this.healthCheckPath}`, {
+      const response = await fetch(`http://127.0.0.1:${this.port}${this.healthCheckPath}`, {
         method: 'GET',
         signal: AbortSignal.timeout(5000),
       })

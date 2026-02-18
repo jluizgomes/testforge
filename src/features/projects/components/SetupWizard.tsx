@@ -21,6 +21,7 @@ import {
   ArrowLeft,
   ArrowRight,
 } from 'lucide-react'
+import { useToast } from '@/components/ui/use-toast'
 import { useProjectSetup } from '../hooks/useProjectSetup'
 
 interface SetupWizardProps {
@@ -41,6 +42,7 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
   const [scanSummary, setScanSummary] = useState<string | null>(null)
   const discoveredStructureRef = useRef<Record<string, unknown> | null>(null)
 
+  const { toast } = useToast()
   const {
     config,
     updateConfig,
@@ -76,7 +78,7 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
     setIsScanning(true)
     setScanSummary(null)
     try {
-      const structure = await window.electronAPI.fs.scanProject(projectPath)
+      const structure = await window.electronAPI.file.scanProject(projectPath)
       discoveredStructureRef.current = structure
       const total = (structure as { total_files?: number }).total_files ?? 0
       const eps = ((structure as { entry_points?: unknown[] }).entry_points ?? []).length
@@ -89,12 +91,26 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
   }
 
   const selectProjectPath = async () => {
-    if (typeof window !== 'undefined' && window.electronAPI) {
+    if (typeof window === 'undefined' || !window.electronAPI?.file?.openProject) {
+      toast({
+        title: 'Browse unavailable',
+        description: 'Open the app with Electron to choose a folder (e.g. npm run electron:dev).',
+        variant: 'destructive',
+      })
+      return
+    }
+    try {
       const projectPath = await window.electronAPI.file.openProject()
       if (projectPath) {
         updateConfig({ path: projectPath })
         triggerProjectScan(projectPath)
       }
+    } catch (err) {
+      toast({
+        title: 'Could not open folder',
+        description: err instanceof Error ? err.message : 'Unknown error',
+        variant: 'destructive',
+      })
     }
   }
 
@@ -181,7 +197,7 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
                     }}
                     placeholder="/path/to/project"
                   />
-                  <Button variant="outline" onClick={selectProjectPath}>
+                  <Button type="button" variant="outline" onClick={selectProjectPath}>
                     <FolderOpen className="mr-2 h-4 w-4" />
                     Browse
                   </Button>

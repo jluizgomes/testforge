@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, shell, dialog, Notification } from 'electr
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { BackendManager } from './backend-manager'
+import { BackendManager } from './backend-manager.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -34,8 +34,15 @@ function createWindow() {
     mainWindow?.show()
   })
 
+  // Fallback: show window after 10s even if ready-to-show never fires (e.g. blank page)
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isVisible()) {
+      mainWindow.show()
+    }
+  }, 10_000)
+
   if (isDev) {
-    mainWindow.loadURL('http://jluizgomes.local:5173')
+    mainWindow.loadURL('http://localhost:5173')
     mainWindow.webContents.openDevTools()
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
@@ -55,15 +62,11 @@ function createWindow() {
 async function initBackend() {
   backendManager = new BackendManager()
 
-  try {
-    await backendManager.start()
+  const result = await backendManager.start()
+  if (result.success) {
     console.log('Backend started successfully')
-  } catch (error) {
-    console.error('Failed to start backend:', error)
-    dialog.showErrorBox(
-      'Backend Error',
-      'Failed to start the backend server. Please check the logs.'
-    )
+  } else {
+    console.warn('Backend unavailable:', result.error, '— UI will still open; API calls may fail.')
   }
 }
 
@@ -107,7 +110,8 @@ function setupIpcHandlers() {
 
   // File operations
   ipcMain.handle('file:open-project', async () => {
-    const result = await dialog.showOpenDialog(mainWindow!, {
+    const win = mainWindow ?? undefined
+    const result = await dialog.showOpenDialog(win, {
       properties: ['openDirectory'],
       title: 'Select Project Directory',
     })

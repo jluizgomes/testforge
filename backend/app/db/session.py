@@ -31,9 +31,8 @@ async_session_factory = async_sessionmaker(
 
 
 async def init_db() -> None:
-    """Initialize the database by creating all tables."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    """No-op: schema is managed by Alembic migrations (entrypoint.sh runs upgrade head)."""
+    pass
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

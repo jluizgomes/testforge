@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Card,
@@ -8,22 +9,68 @@ import {
 } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { Plus, FolderOpen, MoreVertical } from 'lucide-react'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Plus, FolderOpen, MoreVertical, Pencil, Trash2, Loader2 } from 'lucide-react'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { useProjects } from '../hooks/useProjects'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { useProjects, useDeleteProject, useUpdateProject } from '../hooks/useProjects'
 import { formatDate } from '@/lib/utils'
+import type { Project } from '@/services/api-client'
 
 interface ProjectsListProps {
   onNewProject: () => void
 }
 
 export function ProjectsList({ onNewProject }: ProjectsListProps) {
-  const { projects, isLoading } = useProjects()
+  const { projects, isLoading, error, refetch } = useProjects()
+  const deleteProject = useDeleteProject()
+  const updateProject = useUpdateProject()
+
+  // Edit dialog state
+  const [editTarget, setEditTarget] = useState<Project | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editDescription, setEditDescription] = useState('')
+
+  // Delete confirmation state
+  const [deleteTarget, setDeleteTarget] = useState<Project | null>(null)
+
+  const openEdit = (project: Project) => {
+    setEditTarget(project)
+    setEditName(project.name)
+    setEditDescription(project.description ?? '')
+  }
+
+  const handleEdit = async () => {
+    if (!editTarget) return
+    await updateProject.mutateAsync({
+      id: editTarget.id,
+      data: {
+        name: editName.trim() || editTarget.name,
+        description: editDescription.trim() || undefined,
+      },
+    })
+    setEditTarget(null)
+  }
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return
+    await deleteProject.mutateAsync(deleteTarget.id)
+    setDeleteTarget(null)
+  }
 
   return (
     <div className="space-y-6">
@@ -40,6 +87,20 @@ export function ProjectsList({ onNewProject }: ProjectsListProps) {
           New Project
         </Button>
       </div>
+
+      {/* Error state */}
+      {error && (
+        <Card className="border-destructive/50 bg-destructive/5">
+          <CardContent className="flex items-center justify-between gap-4 pt-6">
+            <p className="text-sm text-destructive">
+              Failed to load projects. Check if the backend is running.
+            </p>
+            <Button variant="outline" size="sm" onClick={() => refetch()}>
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Projects Grid */}
       {isLoading ? (
@@ -93,9 +154,16 @@ export function ProjectsList({ onNewProject }: ProjectsListProps) {
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
-                    <DropdownMenuItem>Edit</DropdownMenuItem>
-                    <DropdownMenuItem>Duplicate</DropdownMenuItem>
-                    <DropdownMenuItem className="text-destructive">
+                    <DropdownMenuItem onClick={() => openEdit(project)}>
+                      <Pencil className="mr-2 h-3.5 w-3.5" />
+                      Edit
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      className="text-destructive focus:text-destructive"
+                      onClick={() => setDeleteTarget(project)}
+                    >
+                      <Trash2 className="mr-2 h-3.5 w-3.5" />
                       Delete
                     </DropdownMenuItem>
                   </DropdownMenuContent>
@@ -103,9 +171,11 @@ export function ProjectsList({ onNewProject }: ProjectsListProps) {
               </CardHeader>
               <CardContent>
                 <div className="flex items-center justify-between">
-                  <Badge variant="secondary">{project.path}</Badge>
+                  <Badge variant="secondary" className="max-w-[160px] truncate">
+                    {project.path}
+                  </Badge>
                   <span className="text-xs text-muted-foreground">
-                    {formatDate(project.updatedAt)}
+                    {formatDate(project.updated_at)}
                   </span>
                 </div>
               </CardContent>
@@ -113,6 +183,86 @@ export function ProjectsList({ onNewProject }: ProjectsListProps) {
           ))}
         </div>
       )}
+
+      {/* ── Edit Dialog ── */}
+      <Dialog open={!!editTarget} onOpenChange={(open) => !open && setEditTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Project</DialogTitle>
+            <DialogDescription>
+              Update the project name and description.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label htmlFor="edit-name">Project Name</Label>
+              <Input
+                id="edit-name"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                placeholder="Project name"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-description">Description</Label>
+              <Input
+                id="edit-description"
+                value={editDescription}
+                onChange={(e) => setEditDescription(e.target.value)}
+                placeholder="Optional description"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditTarget(null)}>
+              Cancel
+            </Button>
+            <Button onClick={handleEdit} disabled={updateProject.isPending}>
+              {updateProject.isPending ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Saving…
+                </>
+              ) : (
+                'Save Changes'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Delete Confirmation Dialog ── */}
+      <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Project</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete <strong>{deleteTarget?.name}</strong>?
+              This action cannot be undone. All test runs and data associated with
+              this project will be removed.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDelete}
+              disabled={deleteProject.isPending}
+            >
+              {deleteProject.isPending ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Deleting…
+                </>
+              ) : (
+                'Delete Project'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

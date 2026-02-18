@@ -19,8 +19,11 @@ import {
   Bug,
   FileText,
   Loader2,
+  AlertCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { apiClient } from '@/services/api-client'
+import { useAppStore } from '@/stores/app-store'
 
 interface Message {
   id: string
@@ -33,34 +36,34 @@ const suggestedPrompts = [
   {
     icon: Code,
     title: 'Generate Tests',
-    prompt: 'Generate E2E tests for the login page',
+    prompt: 'Generate E2E tests for the login page using Playwright',
   },
   {
     icon: Bug,
     title: 'Analyze Failure',
-    prompt: 'Why did the last test run fail?',
+    prompt: 'Why do E2E tests fail when elements load asynchronously?',
   },
   {
     icon: FileText,
     title: 'Improve Coverage',
-    prompt: 'What tests should I add to improve coverage?',
+    prompt: 'What test scenarios should I add to improve coverage?',
   },
 ]
 
-const initialMessages: Message[] = [
-  {
-    id: '1',
-    role: 'assistant',
-    content:
-      "Hello! I'm your AI testing assistant. I can help you generate tests, analyze failures, and improve your test coverage. What would you like to work on today?",
-    timestamp: new Date(),
-  },
-]
+const WELCOME_MESSAGE: Message = {
+  id: 'welcome',
+  role: 'assistant',
+  content:
+    "Hello! I'm your AI testing assistant. I can help you generate tests, analyze failures, and improve your test coverage. What would you like to work on today?",
+  timestamp: new Date(),
+}
 
 export function AIAssistantPage() {
-  const [messages, setMessages] = useState<Message[]>(initialMessages)
+  const currentProject = useAppStore(s => s.currentProject)
+  const [messages, setMessages] = useState<Message[]>([WELCOME_MESSAGE])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -80,24 +83,80 @@ export function AIAssistantPage() {
     }
 
     setMessages(prev => [...prev, userMessage])
+    const currentInput = input
     setInput('')
     setIsLoading(true)
+    setError(null)
 
-    // Simulate AI response
-    setTimeout(() => {
+    try {
+      // Build conversation history (skip the welcome message)
+      const history = messages
+        .filter(m => m.id !== 'welcome')
+        .map(m => ({ role: m.role, content: m.content }))
+
+      const res = await apiClient.chat(
+        currentProject?.id ?? 'general',
+        currentInput,
+        history
+      )
+
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: generateMockResponse(input),
+        content: res.response,
         timestamp: new Date(),
       }
       setMessages(prev => [...prev, assistantMessage])
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Failed to reach AI assistant'
+      )
+    } finally {
       setIsLoading(false)
-    }, 1500)
+    }
   }
 
-  const handlePromptClick = (prompt: string) => {
-    setInput(prompt)
+  const handlePromptClick = async (prompt: string) => {
+    if (isLoading) return
+
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: prompt,
+      timestamp: new Date(),
+    }
+
+    setMessages(prev => [...prev, userMessage])
+    setIsLoading(true)
+    setError(null)
+
+    try {
+      const history = messages
+        .filter(m => m.id !== 'welcome')
+        .map(m => ({ role: m.role, content: m.content }))
+
+      const res = await apiClient.chat(
+        currentProject?.id ?? 'general',
+        prompt,
+        history
+      )
+
+      setMessages(prev => [
+        ...prev,
+        {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: res.response,
+          timestamp: new Date(),
+        },
+      ])
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Failed to reach AI assistant'
+      )
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   return (
@@ -125,6 +184,7 @@ export function AIAssistantPage() {
                   variant="outline"
                   className="w-full justify-start"
                   onClick={() => handlePromptClick(item.prompt)}
+                  disabled={isLoading}
                 >
                   <item.icon className="mr-2 h-4 w-4" />
                   {item.title}
@@ -142,15 +202,25 @@ export function AIAssistantPage() {
               <div className="space-y-2 text-sm">
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Project:</span>
-                  <Badge variant="secondary">Demo Project</Badge>
+                  {currentProject ? (
+                    <Badge variant="secondary" className="max-w-[120px] truncate text-xs">
+                      {currentProject.name}
+                    </Badge>
+                  ) : (
+                    <span className="text-xs text-muted-foreground italic">
+                      None selected
+                    </span>
+                  )}
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Tests:</span>
-                  <span>156 total</span>
+                  <span className="text-muted-foreground">AI:</span>
+                  <span className="text-xs text-green-500">Ready</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-muted-foreground">Last Run:</span>
-                  <span>2h ago</span>
+                  <span className="text-muted-foreground">RAG:</span>
+                  <span className="text-xs text-muted-foreground">
+                    {currentProject ? 'project context' : 'general'}
+                  </span>
                 </div>
               </div>
             </CardContent>
@@ -209,8 +279,14 @@ export function AIAssistantPage() {
                     </div>
                     <div className="flex items-center gap-2 rounded-lg bg-muted px-4 py-2">
                       <Loader2 className="h-4 w-4 animate-spin" />
-                      <span className="text-sm">Thinking...</span>
+                      <span className="text-sm">Thinking…</span>
                     </div>
+                  </div>
+                )}
+                {error && (
+                  <div className="flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+                    <AlertCircle className="h-4 w-4 shrink-0" />
+                    {error}
                   </div>
                 )}
               </div>
@@ -228,7 +304,7 @@ export function AIAssistantPage() {
                 <Input
                   value={input}
                   onChange={e => setInput(e.target.value)}
-                  placeholder="Ask me anything about your tests..."
+                  placeholder="Ask me anything about your tests…"
                   disabled={isLoading}
                 />
                 <Button type="submit" disabled={!input.trim() || isLoading}>
@@ -245,92 +321,4 @@ export function AIAssistantPage() {
       </div>
     </div>
   )
-}
-
-function generateMockResponse(input: string): string {
-  const lower = input.toLowerCase()
-
-  if (lower.includes('generate') && lower.includes('test')) {
-    return `I'll generate E2E tests for you. Based on your project structure, here's a test for the login page:
-
-\`\`\`typescript
-import { test, expect } from '@playwright/test';
-
-test('should login successfully with valid credentials', async ({ page }) => {
-  await page.goto('/login');
-
-  await page.fill('[data-testid="email-input"]', 'user@example.com');
-  await page.fill('[data-testid="password-input"]', 'password123');
-  await page.click('[data-testid="login-button"]');
-
-  await expect(page).toHaveURL('/dashboard');
-  await expect(page.locator('[data-testid="welcome-message"]')).toBeVisible();
-});
-
-test('should show error for invalid credentials', async ({ page }) => {
-  await page.goto('/login');
-
-  await page.fill('[data-testid="email-input"]', 'invalid@example.com');
-  await page.fill('[data-testid="password-input"]', 'wrongpassword');
-  await page.click('[data-testid="login-button"]');
-
-  await expect(page.locator('[data-testid="error-message"]')).toContainText('Invalid credentials');
-});
-\`\`\`
-
-Would you like me to generate more tests or modify these?`
-  }
-
-  if (lower.includes('fail') || lower.includes('error')) {
-    return `Looking at your last test run, I found a failure in the "Form Submission" test.
-
-**Root Cause Analysis:**
-- The test failed because the submit button selector \`#submit-btn\` was not found
-- This could be due to a recent UI change or the element loading asynchronously
-
-**Suggested Fixes:**
-1. Update the selector to use a data-testid attribute
-2. Add a wait condition before clicking the button
-3. Check if the form is rendered conditionally
-
-Here's the corrected test:
-
-\`\`\`typescript
-// Before
-await page.click('#submit-btn');
-
-// After
-await page.waitForSelector('[data-testid="submit-button"]');
-await page.click('[data-testid="submit-button"]');
-\`\`\`
-
-Would you like me to apply this fix?`
-  }
-
-  if (lower.includes('coverage')) {
-    return `Based on analyzing your codebase, here are my recommendations to improve test coverage:
-
-**Missing Coverage Areas:**
-1. **Error handling paths** - Most error scenarios aren't tested
-2. **Edge cases in forms** - Empty inputs, special characters
-3. **Authentication flows** - Password reset, session expiry
-4. **API error responses** - Network failures, 500 errors
-
-**Priority Tests to Add:**
-1. Test form validation for all required fields
-2. Test unauthorized access redirects
-3. Test loading states and skeletons
-4. Test pagination in list views
-
-Would you like me to generate tests for any of these areas?`
-  }
-
-  return `I understand you're asking about "${input}". I can help you with:
-
-1. **Generating Tests** - Create E2E, API, or database tests
-2. **Analyzing Failures** - Understand why tests failed
-3. **Improving Coverage** - Identify gaps in your test suite
-4. **Best Practices** - Get recommendations for better tests
-
-What specific aspect would you like me to focus on?`
 }

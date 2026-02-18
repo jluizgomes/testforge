@@ -10,6 +10,13 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   Download,
   FileText,
   Calendar,
@@ -21,37 +28,14 @@ import {
   ToggleLeft,
   ToggleRight,
   Loader2,
+  CheckCircle2,
+  XCircle,
 } from 'lucide-react'
-import { formatDate } from '@/lib/utils'
-import { apiClient, type ReportSchedule } from '@/services/api-client'
+import { formatDate, formatDuration } from '@/lib/utils'
+import { apiClient, type ReportSchedule, type TestRun } from '@/services/api-client'
 import { ScheduleReportDialog } from '../components/ScheduleReportDialog'
-
-const recentReports = [
-  {
-    id: '1',
-    name: 'Full E2E Test Report',
-    date: '2024-01-15T14:30:00',
-    format: 'HTML',
-    size: '2.4 MB',
-    status: 'passed',
-  },
-  {
-    id: '2',
-    name: 'API Integration Report',
-    date: '2024-01-15T12:15:00',
-    format: 'PDF',
-    size: '1.8 MB',
-    status: 'failed',
-  },
-  {
-    id: '3',
-    name: 'Weekly Summary',
-    date: '2024-01-14T18:00:00',
-    format: 'PDF',
-    size: '3.2 MB',
-    status: 'passed',
-  },
-]
+import { useProjects } from '@/features/projects/hooks/useProjects'
+import { useAppStore } from '@/stores/app-store'
 
 const FORMAT_COLORS: Record<string, string> = {
   html: 'bg-blue-500/10 text-blue-600 border-blue-200',
@@ -61,12 +45,30 @@ const FORMAT_COLORS: Record<string, string> = {
   markdown: 'bg-slate-500/10 text-slate-600 border-slate-200',
 }
 
+const REPORT_FORMATS = [
+  { label: 'HTML', value: 'html' },
+  { label: 'PDF', value: 'pdf' },
+  { label: 'JSON', value: 'json' },
+  { label: 'JUnit XML', value: 'xml' },
+  { label: 'Markdown', value: 'markdown' },
+] as const
+
 export function ReportsPage() {
+  const { projects } = useProjects()
+  const currentProject = useAppStore(s => s.currentProject)
+
   const [schedules, setSchedules] = useState<ReportSchedule[]>([])
   const [loadingSchedules, setLoadingSchedules] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [togglingId, setTogglingId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+
+  const [runs, setRuns] = useState<TestRun[]>([])
+  const [loadingRuns, setLoadingRuns] = useState(false)
+  const [generatingRunId, setGeneratingRunId] = useState<string | null>(null)
+  const [reportFormat, setReportFormat] = useState<string>('html')
+
+  const activeProject = currentProject ?? projects[0] ?? null
 
   const loadSchedules = () => {
     setLoadingSchedules(true)
@@ -80,6 +82,16 @@ export function ReportsPage() {
   useEffect(() => {
     loadSchedules()
   }, [])
+
+  useEffect(() => {
+    if (!activeProject?.id) return
+    setLoadingRuns(true)
+    apiClient
+      .getTestRuns(activeProject.id)
+      .then(r => setRuns(r.slice(0, 20)))
+      .catch(() => setRuns([]))
+      .finally(() => setLoadingRuns(false))
+  }, [activeProject?.id])
 
   const handleCreated = (schedule: ReportSchedule) => {
     setSchedules(prev => [schedule, ...prev])
@@ -111,6 +123,47 @@ export function ReportsPage() {
     }
   }
 
+  const handleGenerateReport = async (run: TestRun) => {
+    if (!activeProject?.id) return
+    setGeneratingRunId(run.id)
+    try {
+      const blob = await apiClient.generateReport(
+        activeProject.id,
+        run.id,
+        reportFormat as 'html' | 'pdf' | 'json' | 'xml' | 'markdown'
+      )
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      const ext = reportFormat === 'xml' ? 'xml' : reportFormat
+      a.download = `report-${run.id.slice(0, 8)}.${ext}`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      // ignore — could show toast
+    } finally {
+      setGeneratingRunId(null)
+    }
+  }
+
+  // Stats computed from real runs
+  const completedRuns = runs.filter(
+    r => r.status === 'passed' || r.status === 'failed'
+  )
+  const totalTests = completedRuns.reduce((sum, r) => sum + r.total_tests, 0)
+  const totalPassed = completedRuns.reduce((sum, r) => sum + r.passed_tests, 0)
+  const passRate =
+    totalTests > 0
+      ? Math.round((totalPassed / totalTests) * 100 * 10) / 10
+      : null
+  const avgDurationMs =
+    completedRuns.length > 0
+      ? Math.round(
+          completedRuns.reduce((sum, r) => sum + (r.duration_ms ?? 0), 0) /
+            completedRuns.length
+        )
+      : null
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -121,22 +174,29 @@ export function ReportsPage() {
             Generate and view test execution reports
           </p>
         </div>
-        <Button>
-          <FileText className="mr-2 h-4 w-4" />
-          Generate Report
-        </Button>
+        {activeProject && (
+          <Badge variant="secondary">{activeProject.name}</Badge>
+        )}
       </div>
 
       {/* Quick Stats */}
       <div className="grid gap-4 md:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Reports Generated</CardTitle>
+            <CardTitle className="text-sm font-medium">Total Runs</CardTitle>
             <FileText className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">24</div>
-            <p className="text-xs text-muted-foreground">This month</p>
+            {loadingRuns ? (
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            ) : (
+              <>
+                <div className="text-2xl font-bold">{runs.length || '—'}</div>
+                <p className="text-xs text-muted-foreground">
+                  {activeProject?.name ?? 'No project'}
+                </p>
+              </>
+            )}
           </CardContent>
         </Card>
 
@@ -146,19 +206,39 @@ export function ReportsPage() {
             <TrendingUp className="h-4 w-4 text-success" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">91.2%</div>
-            <p className="text-xs text-muted-foreground">+2.3% from last month</p>
+            {loadingRuns ? (
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            ) : (
+              <>
+                <div className="text-2xl font-bold">
+                  {passRate != null ? `${passRate}%` : '—'}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {completedRuns.length} completed runs
+                </p>
+              </>
+            )}
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Test Runs</CardTitle>
+            <CardTitle className="text-sm font-medium">Tests Run</CardTitle>
             <BarChart3 className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">156</div>
-            <p className="text-xs text-muted-foreground">This month</p>
+            {loadingRuns ? (
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            ) : (
+              <>
+                <div className="text-2xl font-bold">
+                  {totalTests > 0 ? totalTests : '—'}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Total test executions
+                </p>
+              </>
+            )}
           </CardContent>
         </Card>
 
@@ -168,8 +248,16 @@ export function ReportsPage() {
             <Clock className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">4m 32s</div>
-            <p className="text-xs text-muted-foreground">Per test run</p>
+            {loadingRuns ? (
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            ) : (
+              <>
+                <div className="text-2xl font-bold">
+                  {avgDurationMs != null ? formatDuration(avgDurationMs) : '—'}
+                </div>
+                <p className="text-xs text-muted-foreground">Per test run</p>
+              </>
+            )}
           </CardContent>
         </Card>
       </div>
@@ -177,7 +265,7 @@ export function ReportsPage() {
       {/* Tabs */}
       <Tabs defaultValue="recent">
         <TabsList>
-          <TabsTrigger value="recent">Recent Reports</TabsTrigger>
+          <TabsTrigger value="recent">Recent Runs</TabsTrigger>
           <TabsTrigger value="scheduled">
             Scheduled
             {schedules.length > 0 && (
@@ -189,52 +277,130 @@ export function ReportsPage() {
           <TabsTrigger value="templates">Templates</TabsTrigger>
         </TabsList>
 
-        {/* ── Recent Reports ── */}
+        {/* ── Recent Runs ── */}
         <TabsContent value="recent" className="mt-6">
           <Card>
             <CardHeader>
-              <CardTitle>Recent Reports</CardTitle>
-              <CardDescription>
-                Download or view your recently generated reports
-              </CardDescription>
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle>Recent Test Runs</CardTitle>
+                  <CardDescription>
+                    Select a format and generate a downloadable report
+                  </CardDescription>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Select value={reportFormat} onValueChange={setReportFormat}>
+                    <SelectTrigger className="w-36">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {REPORT_FORMATS.map(f => (
+                        <SelectItem key={f.value} value={f.value}>
+                          {f.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
             </CardHeader>
             <CardContent>
-              <div className="space-y-4">
-                {recentReports.map(report => (
-                  <div
-                    key={report.id}
-                    className="flex items-center justify-between rounded-lg border p-4"
-                  >
-                    <div className="flex items-center gap-4">
-                      <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted">
-                        <FileText className="h-5 w-5" />
-                      </div>
-                      <div>
-                        <h4 className="font-medium">{report.name}</h4>
-                        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                          <Calendar className="h-3 w-3" />
-                          {formatDate(report.date)}
-                          <span>|</span>
-                          {report.format}
-                          <span>|</span>
-                          {report.size}
+              {!activeProject ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <FileText className="h-16 w-16 text-muted-foreground opacity-30" />
+                  <h3 className="mt-4 text-lg font-semibold">
+                    No project selected
+                  </h3>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Select a project to see its test runs and generate reports.
+                  </p>
+                </div>
+              ) : loadingRuns ? (
+                <div className="flex items-center justify-center py-12 gap-2 text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading runs…
+                </div>
+              ) : runs.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <FileText className="h-16 w-16 text-muted-foreground opacity-30" />
+                  <h3 className="mt-4 text-lg font-semibold">No runs yet</h3>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Run tests from the Test Runner to generate reports.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {runs.map(run => (
+                    <div
+                      key={run.id}
+                      className="flex items-center justify-between rounded-lg border p-4"
+                    >
+                      <div className="flex items-center gap-4">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted">
+                          {run.status === 'passed' ? (
+                            <CheckCircle2 className="h-5 w-5 text-green-500" />
+                          ) : run.status === 'failed' ? (
+                            <XCircle className="h-5 w-5 text-red-500" />
+                          ) : (
+                            <FileText className="h-5 w-5" />
+                          )}
+                        </div>
+                        <div>
+                          <h4 className="font-medium font-mono text-sm">
+                            Run #{run.id.slice(0, 12)}
+                          </h4>
+                          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                            <Calendar className="h-3 w-3" />
+                            {formatDate(run.created_at)}
+                            <span>·</span>
+                            {run.total_tests} tests
+                            {run.duration_ms != null && (
+                              <>
+                                <span>·</span>
+                                {formatDuration(run.duration_ms)}
+                              </>
+                            )}
+                          </div>
                         </div>
                       </div>
+                      <div className="flex items-center gap-4">
+                        <Badge
+                          variant={
+                            run.status === 'passed'
+                              ? 'success'
+                              : run.status === 'failed'
+                                ? 'destructive'
+                                : run.status === 'running'
+                                  ? 'warning'
+                                  : 'secondary'
+                          }
+                        >
+                          {run.status}
+                        </Badge>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={
+                            generatingRunId === run.id ||
+                            run.status === 'running' ||
+                            run.status === 'pending'
+                          }
+                          onClick={() => handleGenerateReport(run)}
+                        >
+                          {generatingRunId === run.id ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <Download className="mr-2 h-4 w-4" />
+                          )}
+                          {generatingRunId === run.id
+                            ? 'Generating…'
+                            : `${reportFormat.toUpperCase()}`}
+                        </Button>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-4">
-                      <Badge
-                        variant={report.status === 'passed' ? 'success' : 'destructive'}
-                      >
-                        {report.status}
-                      </Badge>
-                      <Button variant="outline" size="sm">
-                        <Download className="mr-2 h-4 w-4" />
-                        Download
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
         </TabsContent>
@@ -265,7 +431,9 @@ export function ReportsPage() {
               ) : schedules.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center">
                   <Calendar className="h-16 w-16 text-muted-foreground opacity-30" />
-                  <h3 className="mt-4 text-lg font-semibold">No scheduled reports</h3>
+                  <h3 className="mt-4 text-lg font-semibold">
+                    No scheduled reports
+                  </h3>
                   <p className="mt-2 text-sm text-muted-foreground">
                     Set up automatic report generation on a schedule.
                   </p>
@@ -288,7 +456,8 @@ export function ReportsPage() {
                             <span className="font-medium">{schedule.name}</span>
                             <span
                               className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${
-                                FORMAT_COLORS[schedule.format] ?? 'bg-muted text-muted-foreground'
+                                FORMAT_COLORS[schedule.format] ??
+                                'bg-muted text-muted-foreground'
                               }`}
                             >
                               {schedule.format}
@@ -300,11 +469,15 @@ export function ReportsPage() {
                             )}
                           </div>
                           <div className="mt-0.5 flex items-center gap-3 text-xs text-muted-foreground">
-                            <span className="font-mono">{schedule.cron_expr}</span>
+                            <span className="font-mono">
+                              {schedule.cron_expr}
+                            </span>
                             {schedule.next_run_at && (
                               <>
                                 <span>·</span>
-                                <span>Next: {formatDate(schedule.next_run_at)}</span>
+                                <span>
+                                  Next: {formatDate(schedule.next_run_at)}
+                                </span>
                               </>
                             )}
                             {schedule.run_count > 0 && (
@@ -322,7 +495,11 @@ export function ReportsPage() {
                           variant="ghost"
                           size="icon"
                           className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                          title={schedule.enabled ? 'Pause schedule' : 'Enable schedule'}
+                          title={
+                            schedule.enabled
+                              ? 'Pause schedule'
+                              : 'Enable schedule'
+                          }
                           disabled={togglingId === schedule.id}
                           onClick={() => handleToggle(schedule)}
                         >
@@ -359,47 +536,49 @@ export function ReportsPage() {
         {/* ── Templates ── */}
         <TabsContent value="templates" className="mt-6">
           <div className="grid gap-4 md:grid-cols-3">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-lg">Executive Summary</CardTitle>
-                <CardDescription>
-                  High-level overview for stakeholders
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Button variant="outline" className="w-full">
-                  Use Template
-                </Button>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-lg">Detailed Technical</CardTitle>
-                <CardDescription>
-                  In-depth analysis for developers
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Button variant="outline" className="w-full">
-                  Use Template
-                </Button>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-lg">Compliance Report</CardTitle>
-                <CardDescription>
-                  Audit-ready documentation
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Button variant="outline" className="w-full">
-                  Use Template
-                </Button>
-              </CardContent>
-            </Card>
+            {[
+              {
+                title: 'Executive Summary',
+                desc: 'High-level overview for stakeholders',
+                format: 'html',
+              },
+              {
+                title: 'Detailed Technical',
+                desc: 'In-depth analysis for developers',
+                format: 'html',
+              },
+              {
+                title: 'JUnit XML',
+                desc: 'CI/CD compatible test results',
+                format: 'xml',
+              },
+            ].map(template => (
+              <Card key={template.title}>
+                <CardHeader>
+                  <CardTitle className="text-lg">{template.title}</CardTitle>
+                  <CardDescription>{template.desc}</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    disabled={!activeProject || runs.length === 0}
+                    onClick={() => {
+                      if (!activeProject || runs.length === 0) return
+                      const lastRun = runs.find(
+                        r => r.status === 'passed' || r.status === 'failed'
+                      )
+                      if (lastRun) {
+                        setReportFormat(template.format)
+                        handleGenerateReport(lastRun)
+                      }
+                    }}
+                  >
+                    Use Template
+                  </Button>
+                </CardContent>
+              </Card>
+            ))}
           </div>
         </TabsContent>
       </Tabs>

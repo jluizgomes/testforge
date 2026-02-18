@@ -242,11 +242,28 @@ class ReportGenerator:
             "pending": "status-pending",
         }.get(status.lower(), "status-unknown")
 
+    def _failures_section_html(self, failures: list[dict[str, Any]]) -> str:
+        """Build failures section HTML to avoid nested f-strings in template."""
+        if not failures:
+            return ""
+        parts = []
+        for f in failures:
+            name = f.get("test_name", "Unknown Test")
+            msg = f.get("error_message", "No error message")
+            stack = f.get("error_stack")
+            stack_html = f"<pre>{stack}</pre>" if stack else ""
+            parts.append(
+                f"<div class=\"failure\"><strong>{name}</strong><p>{msg}</p>{stack_html}</div>"
+            )
+        inner = "".join(parts)
+        return f"<div class=\"section\"><h2>Failures ({len(failures)})</h2>{inner}</div>"
+
     def _render_inline_html(self, report_data: dict[str, Any]) -> str:
         """Render HTML using inline template."""
         summary = report_data.get("summary", {})
         metadata = report_data.get("metadata", {})
         failures = report_data.get("failures", [])
+        failures_html = self._failures_section_html(failures)
 
         return f"""
 <!DOCTYPE html>
@@ -364,18 +381,7 @@ class ReportGenerator:
         </div>
     </div>
 
-    {"".join(f'''
-    <div class="section">
-        <h2>Failures ({len(failures)})</h2>
-        {"".join(f'''
-        <div class="failure">
-            <strong>{f.get('test_name', 'Unknown Test')}</strong>
-            <p>{f.get('error_message', 'No error message')}</p>
-            {f'<pre>{f.get("error_stack", "")}</pre>' if f.get('error_stack') else ''}
-        </div>
-        ''' for f in failures) if failures else '<p>No failures</p>'}
-    </div>
-    ''' if failures else '')}
+    {failures_html}
 
     <div class="section">
         <h2>Recommendations</h2>

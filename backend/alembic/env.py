@@ -12,7 +12,17 @@ from app.config import settings
 from app.db.base import Base
 
 # Import all models so they are registered with Base.metadata
-from app.models import Project, ProjectConfig, TestRun, TestResult, Trace, Span  # noqa: F401
+from app.models import (  # noqa: F401
+    Project,
+    ProjectConfig,
+    TestRun,
+    TestResult,
+    Trace,
+    Span,
+    ScanJob,
+    GeneratedTest,
+    ReportSchedule,
+)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

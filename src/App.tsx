@@ -7,6 +7,7 @@ import { TestRunnerPage } from './features/test-runner/pages/TestRunnerPage'
 import { TraceExplorerPage } from './features/trace-explorer/pages/TraceExplorerPage'
 import { AIAssistantPage } from './features/ai-assistant/pages/AIAssistantPage'
 import { ReportsPage } from './features/reports/pages/ReportsPage'
+import { TestEditorPage } from './features/test-editor/pages/TestEditorPage'
 import { SettingsPage } from './features/settings/pages/SettingsPage'
 import { useAppStore } from './stores/app-store'
 import { Toaster } from './components/ui/toaster'
@@ -15,10 +16,12 @@ function App() {
   const { initializeBackend, theme } = useAppStore()
 
   useEffect(() => {
-    // Apply theme
     const root = document.documentElement
     root.classList.remove('light', 'dark')
-    root.classList.add(theme)
+    const resolved = theme === 'system'
+      ? (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+      : theme
+    root.classList.add(resolved)
   }, [theme])
 
   useEffect(() => {
@@ -34,6 +37,7 @@ function App() {
           <Route path="dashboard" element={<Dashboard />} />
           <Route path="projects/*" element={<ProjectsPage />} />
           <Route path="test-runner" element={<TestRunnerPage />} />
+          <Route path="test-editor" element={<TestEditorPage />} />
           <Route path="traces" element={<TraceExplorerPage />} />
           <Route path="ai-assistant" element={<AIAssistantPage />} />
           <Route path="reports" element={<ReportsPage />} />

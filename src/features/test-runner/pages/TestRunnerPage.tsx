@@ -37,6 +37,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppStore } from '@/stores/app-store'
+import { useProjects } from '@/features/projects/hooks/useProjects'
 import { apiClient, type TestResultItem, type NetworkRequest } from '@/services/api-client'
 
 // Lazy-load Monaco to avoid crashing if not installed yet
@@ -96,11 +97,18 @@ test.describe('My Test Suite', () => {
 
 // ── Component ──────────────────────────────────────────────────────────────
 export function TestRunnerPage() {
-  const { projects, selectedProjectId } = useAppStore()
+  const { projects } = useProjects()
+  const currentProject = useAppStore(s => s.currentProject)
 
-  const [activeProjectId, setActiveProjectId] = useState<string>(
-    selectedProjectId || projects[0]?.id || ''
-  )
+  const [activeProjectId, setActiveProjectId] = useState<string>('')
+
+  // Set default project once data is available
+  useEffect(() => {
+    if (!activeProjectId) {
+      const defaultId = currentProject?.id || projects[0]?.id || ''
+      if (defaultId) setActiveProjectId(defaultId)
+    }
+  }, [projects, currentProject, activeProjectId])
   const [activeRunId, setActiveRunId] = useState<string | null>(null)
   const [isRunning, setIsRunning] = useState(false)
   const [progress, setProgress] = useState(0)
@@ -152,18 +160,23 @@ export function TestRunnerPage() {
       setResults(items)
       const run = await apiClient.getTestRun(projectId, runId)
       const pct =
-        run.status === 'passed' || run.status === 'failed'
+        run.status === 'passed' || run.status === 'failed' || run.status === 'cancelled'
           ? 100
-          : run.results
-            ? Math.round(((run.results.passed + run.results.failed) / (run.results.total || 1)) * 100)
+          : run.total_tests > 0
+            ? Math.round(
+                ((run.passed_tests + run.failed_tests) / run.total_tests) * 100
+              )
             : progress
 
       setProgress(pct)
 
-      if (run.status === 'passed' || run.status === 'failed') {
+      if (run.status === 'passed' || run.status === 'failed' || run.status === 'cancelled') {
         setIsRunning(false)
         if (pollRef.current) clearInterval(pollRef.current)
-        addLog(run.status === 'passed' ? 'success' : 'error', `Run completed — status: ${run.status}`)
+        addLog(
+          run.status === 'passed' ? 'success' : 'error',
+          `Run completed — status: ${run.status}`
+        )
       }
     } catch {
       // Ignore polling errors

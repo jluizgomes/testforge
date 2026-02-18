@@ -1,5 +1,8 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import type { Project } from '@/services/api-client'
+
+export type { Project }
 
 export type Theme = 'light' | 'dark' | 'system'
 
@@ -7,23 +10,6 @@ export interface BackendStatus {
   status: 'starting' | 'running' | 'stopped' | 'error'
   port: number | null
   error?: string
-}
-
-export interface Project {
-  id: string
-  name: string
-  path: string
-  description?: string
-  createdAt: string
-  updatedAt: string
-  config?: ProjectConfig
-}
-
-export interface ProjectConfig {
-  frontendUrl?: string
-  backendUrl?: string
-  databaseUrl?: string
-  redisUrl?: string
 }
 
 interface AppState {
@@ -107,7 +93,7 @@ export const useAppStore = create<AppState>()(
             })
           }
         } else {
-          // Development mode without Electron
+          // Development mode without Electron (backend e.g. in Docker at jluizgomes.local:8000)
           set({
             backendUrl: 'http://jluizgomes.local:8000',
             backendStatus: { status: 'running', port: 8000 },

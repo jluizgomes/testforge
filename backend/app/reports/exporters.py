@@ -74,7 +74,7 @@ class PDFExporter(BaseExporter):
             import weasyprint
 
             return True
-        except ImportError:
+        except (ImportError, OSError, Exception):
             return False
 
     def export(self, report_data: dict[str, Any]) -> bytes:

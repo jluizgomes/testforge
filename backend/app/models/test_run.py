@@ -121,8 +121,8 @@ class TestResult(Base, UUIDMixin, TimestampMixin):
     test_run: Mapped["TestRun"] = relationship("TestRun", back_populates="results")
 
     @property
-    def metadata(self) -> dict | None:
-        """Alias for extra_data — used by Pydantic serialization."""
+    def result_metadata(self) -> dict | None:
+        """Alias for extra_data — used by Pydantic serialization (avoids shadowing Base.metadata)."""
         return self.extra_data
 
     def __repr__(self) -> str:

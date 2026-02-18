@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.models.test_run import TestResultStatus, TestRunStatus
 
@@ -44,8 +44,32 @@ class TestResultResponse(BaseModel):
     screenshot_path: str | None
     video_path: str | None
     trace_id: str | None
-    metadata: dict | None
+    metadata: dict | None = None
     created_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def map_metadata_from_orm(cls, data: object) -> object:
+        if hasattr(data, "result_metadata"):
+            orm = data
+            return {
+                "id": getattr(orm, "id", None),
+                "test_run_id": getattr(orm, "test_run_id", None),
+                "test_name": getattr(orm, "test_name", None),
+                "test_file": getattr(orm, "test_file", None),
+                "test_suite": getattr(orm, "test_suite", None),
+                "test_layer": getattr(orm, "test_layer", None),
+                "status": getattr(orm, "status", None),
+                "duration_ms": getattr(orm, "duration_ms", None),
+                "error_message": getattr(orm, "error_message", None),
+                "error_stack": getattr(orm, "error_stack", None),
+                "screenshot_path": getattr(orm, "screenshot_path", None),
+                "video_path": getattr(orm, "video_path", None),
+                "trace_id": getattr(orm, "trace_id", None),
+                "metadata": orm.result_metadata,
+                "created_at": getattr(orm, "created_at", None),
+            }
+        return data
 
 
 class TestRunResponse(BaseModel):

@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# Cancel in-flight runs for the same branch on new pushes
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Frontend — lint · typecheck · test (runs directly on the runner)
+  # ────────────────────────────────────────────────────────────────────────────
+  frontend:
+    name: Frontend (lint · typecheck · test)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (ESLint)
+        run: npm run lint
+
+      - name: Type check (tsc)
+        run: npm run typecheck
+
+      - name: Tests (Vitest)
+        run: npm run test
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Backend — lint · test (everything runs inside Docker)
+  # Services: core-postgres and core-redis via docker compose
+  # ────────────────────────────────────────────────────────────────────────────
+  backend:
+    name: Backend (lint · test in Docker)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cache pip install layers — key is pyproject.toml + Dockerfile content
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-docker-${{ hashFiles('backend/pyproject.toml', 'backend/Dockerfile') }}
+          restore-keys: |
+            ${{ runner.os }}-docker-
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: image=moby/buildkit:latest
+
+      # docker compose build uses BuildKit and correctly names the image
+      # so that subsequent `docker compose run` skips the rebuild.
+      - name: Build backend image
+        run: |
+          docker compose build \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            backend
+        env:
+          DOCKER_BUILDKIT: "1"
+          COMPOSE_DOCKER_CLI_BUILD: "1"
+
+      - name: Start infrastructure services
+        run: docker compose up -d core-postgres core-redis
+
+      - name: Wait for PostgreSQL
+        run: |
+          echo "Waiting for PostgreSQL..."
+          for i in $(seq 1 30); do
+            if docker compose exec -T core-postgres pg_isready -U testforge -d testforge 2>/dev/null; then
+              echo "PostgreSQL is ready"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Wait for Redis
+        run: |
+          echo "Waiting for Redis..."
+          for i in $(seq 1 30); do
+            if docker compose exec -T core-redis redis-cli ping 2>/dev/null | grep -q PONG; then
+              echo "Redis is ready"
+              break
+            fi
+            sleep 2
+          done
+
+      # Lint runs without DB/Redis — use --no-deps to avoid starting services
+      - name: Lint (ruff)
+        run: docker compose run --rm --no-deps backend ruff check app
+
+      # Full test suite inside the backend container.
+      # --no-deps: services are already up; compose won't try to start them.
+      # The container joins the compose project network automatically, so it
+      # can reach core-postgres and core-redis by their container names.
+      - name: Run tests (pytest)
+        run: |
+          docker compose run --rm --no-deps \
+            -e DATABASE_URL=postgresql+asyncpg://testforge:testforge@core-postgres:5432/testforge \
+            -e REDIS_URL=redis://core-redis:6379 \
+            -e SECRET_KEY=ci-test-secret-key \
+            -e ENVIRONMENT=development \
+            -e DEBUG=false \
+            backend pytest
+
+      - name: Stop services
+        if: always()
+        run: docker compose down -v

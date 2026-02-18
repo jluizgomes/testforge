@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision = "20260217_0002"
-down_revision = "20260217_0001"
+down_revision = "add_scanner_tables"
 branch_labels = None
 depends_on = None
 

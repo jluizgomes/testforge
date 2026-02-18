@@ -1,6 +1,24 @@
 import { useAppStore } from '@/stores/app-store'
 
-// Types
+// ── Health ────────────────────────────────────────────────────────────────────
+
+export interface ServiceHealth {
+  status: 'healthy' | 'unhealthy'
+  latency_ms?: number
+  error?: string
+}
+
+export interface HealthData {
+  status: string
+  version: string
+  services: {
+    database?: ServiceHealth
+    redis?: ServiceHealth
+  }
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+
 export interface AppSettings {
   ai_provider: string
   ai_model: string
@@ -14,6 +32,8 @@ export interface AppSettings {
   rag_auto_index: boolean
   rag_include_openapi: boolean
 }
+
+// ── Scanner ───────────────────────────────────────────────────────────────────
 
 export interface GeneratedTestItem {
   id: string
@@ -33,29 +53,52 @@ export interface ConnectionValidateResponse {
   error?: string
 }
 
+// ── Projects ──────────────────────────────────────────────────────────────────
+
+export interface ProjectConfig {
+  id?: string
+  project_id?: string
+  frontend_url?: string | null
+  backend_url?: string | null
+  openapi_url?: string | null
+  database_url?: string | null
+  redis_url?: string | null
+  playwright_config?: Record<string, unknown> | null
+  test_timeout?: number
+  parallel_workers?: number
+  retry_count?: number
+  ai_provider?: string | null
+  ai_model?: string | null
+  created_at?: string
+  updated_at?: string
+}
+
 export interface Project {
   id: string
   name: string
   path: string
-  description?: string
-  createdAt: string
-  updatedAt: string
-  config?: ProjectConfig
-}
-
-export interface ProjectConfig {
-  frontendUrl?: string
-  backendUrl?: string
-  databaseUrl?: string
-  redisUrl?: string
+  description?: string | null
+  is_active: boolean
+  created_at: string
+  updated_at: string
+  config?: ProjectConfig | null
 }
 
 export interface CreateProjectInput {
   name: string
   path: string
   description?: string
-  config?: ProjectConfig
+  config?: {
+    frontend_url?: string
+    backend_url?: string
+    openapi_url?: string
+    database_url?: string
+    redis_url?: string
+    playwright_config?: Record<string, unknown>
+  }
 }
+
+// ── Network ───────────────────────────────────────────────────────────────────
 
 export interface NetworkRequest {
   url: string
@@ -65,6 +108,8 @@ export interface NetworkRequest {
   timestamp: string
   headers?: Record<string, string>
 }
+
+// ── Test Runs ─────────────────────────────────────────────────────────────────
 
 export interface TestResultItem {
   id: string
@@ -89,39 +134,56 @@ export interface TestResultItem {
 
 export interface TestRun {
   id: string
-  projectId: string
-  status: 'pending' | 'running' | 'passed' | 'failed'
-  startedAt: string
-  completedAt?: string
-  results?: TestResults
+  project_id: string
+  status: 'pending' | 'running' | 'passed' | 'failed' | 'cancelled'
+  started_at: string | null
+  completed_at: string | null
+  total_tests: number
+  passed_tests: number
+  failed_tests: number
+  skipped_tests: number
+  duration_ms: number | null
+  config: Record<string, unknown> | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
+  results?: TestResultItem[]
 }
 
-export interface TestResults {
-  total: number
-  passed: number
-  failed: number
-  skipped: number
-  duration: number
+// ── Traces ────────────────────────────────────────────────────────────────────
+
+export interface Span {
+  id: string
+  span_id: string
+  parent_span_id: string | null
+  service: string
+  operation: string
+  start_time: string
+  end_time: string
+  duration_ms: number
+  status: string
+  error_message: string | null
+  attributes: Record<string, unknown> | null
+  events: unknown[] | null
 }
 
 export interface Trace {
   id: string
-  testRunId: string
-  traceId: string
-  spans: Span[]
-  createdAt: string
+  test_run_id: string
+  trace_id: string
+  start_time: string
+  end_time: string | null
+  duration_ms: number | null
+  root_service: string
+  root_operation: string
+  status: string
+  error_message: string | null
+  attributes: Record<string, unknown> | null
+  created_at: string
+  spans: Span[] | null
 }
 
-export interface Span {
-  id: string
-  parentId?: string
-  name: string
-  service: string
-  startTime: number
-  endTime: number
-  status: 'ok' | 'error'
-  attributes?: Record<string, unknown>
-}
+// ── Report Schedules ──────────────────────────────────────────────────────────
 
 export interface ReportSchedule {
   id: string
@@ -144,15 +206,14 @@ export interface CreateScheduleInput {
   enabled?: boolean
 }
 
-// API Client Class
+// ── API Client ────────────────────────────────────────────────────────────────
+
 class ApiClient {
   private getBaseUrl(): string {
-    // Try to get from store first, fall back to env or default
     const storeUrl = useAppStore.getState().backendUrl
     if (storeUrl) return storeUrl
 
     if (typeof window !== 'undefined' && window.electronAPI) {
-      // Will be set after backend starts
       return 'http://jluizgomes.local:8000'
     }
 
@@ -181,12 +242,14 @@ class ApiClient {
     return response.json()
   }
 
-  // Health
-  async healthCheck(): Promise<{ status: string }> {
+  // ── Health ──────────────────────────────────────────────────────────────────
+
+  async healthCheck(): Promise<HealthData> {
     return this.request('/health')
   }
 
-  // Projects
+  // ── Projects ────────────────────────────────────────────────────────────────
+
   async getProjects(): Promise<Project[]> {
     return this.request('/api/v1/projects')
   }
@@ -204,7 +267,7 @@ class ApiClient {
 
   async updateProject(
     id: string,
-    data: Partial<CreateProjectInput>
+    data: Partial<CreateProjectInput> & { config?: Record<string, unknown> }
   ): Promise<Project> {
     return this.request(`/api/v1/projects/${id}`, {
       method: 'PATCH',
@@ -218,7 +281,8 @@ class ApiClient {
     })
   }
 
-  // Test Runs
+  // ── Test Runs ───────────────────────────────────────────────────────────────
+
   async getTestRuns(projectId: string): Promise<TestRun[]> {
     return this.request(`/api/v1/projects/${projectId}/runs`)
   }
@@ -247,30 +311,27 @@ class ApiClient {
     return this.request(`/api/v1/projects/${projectId}/runs/${runId}/results`)
   }
 
-  async updateProject(id: string, data: Record<string, unknown>): Promise<Project> {
-    return this.request(`/api/v1/projects/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify(data),
-    })
-  }
+  // ── Traces ──────────────────────────────────────────────────────────────────
 
-  // Traces
-  async getTraces(runId: string): Promise<Trace[]> {
-    return this.request(`/api/v1/traces?run_id=${runId}`)
+  async getTraces(runId?: string, limit = 50): Promise<Trace[]> {
+    const qs = new URLSearchParams({ limit: String(limit) })
+    if (runId) qs.set('run_id', runId)
+    return this.request(`/api/v1/traces?${qs.toString()}`)
   }
 
   async getTrace(traceId: string): Promise<Trace> {
-    return this.request(`/api/v1/traces/${traceId}`)
+    return this.request(`/api/v1/traces/${traceId}?include_spans=true`)
   }
 
-  // AI
+  // ── AI ──────────────────────────────────────────────────────────────────────
+
   async generateTests(
     projectId: string,
     prompt: string
   ): Promise<{ tests: string[] }> {
     return this.request('/api/v1/ai/generate', {
       method: 'POST',
-      body: JSON.stringify({ projectId, prompt }),
+      body: JSON.stringify({ project_id: projectId, prompt }),
     })
   }
 
@@ -280,7 +341,7 @@ class ApiClient {
   ): Promise<{ analysis: string; suggestions: string[] }> {
     return this.request('/api/v1/ai/analyze', {
       method: 'POST',
-      body: JSON.stringify({ runId, testId }),
+      body: JSON.stringify({ run_id: runId, test_id: testId }),
     })
   }
 
@@ -288,25 +349,26 @@ class ApiClient {
     projectId: string,
     message: string,
     history?: Array<{ role: string; content: string }>
-  ): Promise<{ response: string }> {
+  ): Promise<{ response: string; context_used?: string[] }> {
     return this.request('/api/v1/ai/chat', {
       method: 'POST',
-      body: JSON.stringify({ projectId, message, history }),
+      body: JSON.stringify({ project_id: projectId, message, history }),
     })
   }
 
-  // Reports
+  // ── Reports ─────────────────────────────────────────────────────────────────
+
   async generateReport(
     projectId: string,
     runId: string,
-    format: 'html' | 'pdf' | 'json'
+    format: 'html' | 'pdf' | 'json' | 'xml' | 'markdown'
   ): Promise<Blob> {
     const response = await fetch(
       `${this.getBaseUrl()}/api/v1/reports/generate`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId, runId, format }),
+        body: JSON.stringify({ project_id: projectId, run_id: runId, format }),
       }
     )
 
@@ -317,7 +379,8 @@ class ApiClient {
     return response.blob()
   }
 
-  // Scanner
+  // ── Scanner ─────────────────────────────────────────────────────────────────
+
   async startScan(
     projectId: string,
     preDiscoveredStructure?: Record<string, unknown>
@@ -354,7 +417,8 @@ class ApiClient {
     })
   }
 
-  // Settings
+  // ── Settings ────────────────────────────────────────────────────────────────
+
   async getSettings(): Promise<AppSettings> {
     return this.request('/api/v1/settings')
   }
@@ -366,7 +430,8 @@ class ApiClient {
     })
   }
 
-  // Report Schedules
+  // ── Report Schedules ────────────────────────────────────────────────────────
+
   async getSchedules(projectId?: string): Promise<ReportSchedule[]> {
     const qs = projectId ? `?project_id=${projectId}` : ''
     return this.request(`/api/v1/report-schedules${qs}`)
@@ -395,7 +460,8 @@ class ApiClient {
     })
   }
 
-  // Validate connections
+  // ── Validate connections ────────────────────────────────────────────────────
+
   async validateConnection(
     type: 'database' | 'redis' | 'api',
     url: string

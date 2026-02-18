@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     port: int = 8000
 
     # Database
-    database_url: PostgresDsn | str = "postgresql+asyncpg://testforge:testforge@jluizgomes.local:5432/testforge"
+    database_url: PostgresDsn | str = "postgresql+asyncpg://testforge:testforge@localhost:5432/testforge"
 
     @field_validator("database_url", mode="before")
     @classmethod
@@ -39,7 +39,7 @@ class Settings(BaseSettings):
         return v
 
     # Redis
-    redis_url: str = "redis://jluizgomes.local:6379"
+    redis_url: str = "redis://localhost:6379"
 
     # Security
     secret_key: str = "change-me-in-production-with-a-secure-random-key"
@@ -47,11 +47,18 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
 
     # CORS
-    cors_origins: list[str] = ["http://jluizgomes.local:5173", "http://jluizgomes.local:3000"]
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+        "http://jluizgomes.local:5173",
+        "http://jluizgomes.local:3000",
+    ]
 
     # AI Providers
     openai_api_key: str = ""
-    ollama_base_url: str = "http://jluizgomes.local:11434"
+    ollama_base_url: str = "http://localhost:11434"
     default_ai_provider: Literal["openai", "ollama"] = "openai"
     default_ai_model: str = "gpt-4"
 

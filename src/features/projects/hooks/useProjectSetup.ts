@@ -105,10 +105,11 @@ export function useProjectSetup() {
         description: config.description || undefined,
         path: config.path,
         config: {
-          frontendUrl: config.frontendUrl || undefined,
-          backendUrl: config.backendUrl || undefined,
-          databaseUrl: config.databaseUrl || undefined,
-          redisUrl: config.redisUrl || undefined,
+          frontend_url: config.frontendUrl || undefined,
+          backend_url: config.backendUrl || undefined,
+          openapi_url: config.openApiUrl || undefined,
+          database_url: config.databaseUrl || undefined,
+          redis_url: config.redisUrl || undefined,
         },
       })
 

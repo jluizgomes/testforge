@@ -2,12 +2,13 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiClient, type Project, type CreateProjectInput } from '@/services/api-client'
 
 export function useProjects() {
-  const { data: projects = [], isLoading, error } = useQuery({
+  const { data: projects = [], isLoading, error, refetch } = useQuery({
     queryKey: ['projects'],
-    queryFn: apiClient.getProjects,
+    queryFn: () => apiClient.getProjects(),
+    refetchOnMount: 'always',
   })
 
-  return { projects, isLoading, error }
+  return { projects, isLoading, error, refetch }
 }
 
 export function useProject(id: string) {
@@ -25,7 +26,8 @@ export function useCreateProject() {
 
   return useMutation({
     mutationFn: (input: CreateProjectInput) => apiClient.createProject(input),
-    onSuccess: () => {
+    onSuccess: (newProject: Project) => {
+      queryClient.setQueryData<Project[]>(['projects'], (old = []) => [newProject, ...old])
       queryClient.invalidateQueries({ queryKey: ['projects'] })
     },
   })
