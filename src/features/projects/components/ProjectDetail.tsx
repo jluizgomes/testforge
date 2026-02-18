@@ -241,19 +241,73 @@ export function ProjectDetail() {
   }
 
   // ── Scanner ───────────────────────────────────────────────────────────
+
+  /** Walk a directory handle (File System Access API) and collect entry points. */
+  const scanDirInBrowser = async (
+    dirHandle: FileSystemDirectoryHandle
+  ): Promise<Record<string, unknown>> => {
+    const SKIP = new Set(['node_modules', '.git', '__pycache__', '.venv', 'venv', 'dist', 'build', '.next'])
+    const EXTS = new Set(['.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.java'])
+    const PATTERNS = [
+      /router\.(get|post|put|delete|patch)\s*\(/,
+      /export\s+default\s+function\s+\w+Page/,
+      /@router\.(get|post|put|delete|patch)\s*\(/,
+      /createBrowserRouter|<Route\s/,
+    ]
+    const files: Array<{ path: string; size: number; extension: string }> = []
+    const entry_points: string[] = []
+    let scanned = 0
+
+    const walk = async (handle: FileSystemDirectoryHandle, prefix: string, depth: number) => {
+      if (depth > 8 || scanned >= 300) return
+      for await (const [name, entry] of (handle as unknown as AsyncIterable<[string, FileSystemHandle]>)) {
+        if (entry.kind === 'directory') {
+          if (!SKIP.has(name)) await walk(entry as FileSystemDirectoryHandle, `${prefix}${name}/`, depth + 1)
+        } else {
+          const dotIdx = name.lastIndexOf('.')
+          if (dotIdx < 0) continue
+          const ext = name.slice(dotIdx)
+          if (!EXTS.has(ext)) continue
+          scanned++
+          const path = `${prefix}${name}`
+          const file = await (entry as FileSystemFileHandle).getFile()
+          files.push({ path, size: file.size, extension: ext })
+          const text = await file.text()
+          if (PATTERNS.some(p => p.test(text)) || text.includes('export default') || text.includes('class ')) {
+            entry_points.push(path)
+          }
+        }
+      }
+    }
+
+    await walk(dirHandle, '', 0)
+    return { files, entry_points, total_files: files.length }
+  }
+
   const handleStartScan = async () => {
     if (!project) return
     setScanning(true)
     try {
       let preDiscovered: Record<string, unknown> | undefined
+
       if (window.electronAPI) {
+        // Electron: pre-scan the local filesystem
         try {
           const structure = await window.electronAPI.file.scanProject(project.path)
           preDiscovered = structure as Record<string, unknown>
         } catch {
           // Not fatal — backend will try to scan directly
         }
+      } else if ('showDirectoryPicker' in window) {
+        // Browser: use File System Access API — ask user to select project folder
+        try {
+          const dirHandle = await (window as unknown as { showDirectoryPicker: () => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker()
+          preDiscovered = await scanDirInBrowser(dirHandle)
+        } catch {
+          // User cancelled picker — proceed without pre-discovered structure
+        }
       }
+
       const res = await apiClient.startScan(project.id, preDiscovered)
       setScanJobId(res.job_id)
       setScanModalOpen(true)
