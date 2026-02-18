@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Card,
   CardContent,
@@ -27,6 +27,9 @@ import {
   Clock,
   TrendingUp,
   Loader2,
+  Pencil,
+  FolderOpen,
+  X,
 } from 'lucide-react'
 import { useProject } from '../hooks/useProjects'
 import { apiClient } from '@/services/api-client'
@@ -45,9 +48,16 @@ export function ProjectDetail() {
   const { project, isLoading } = useProject(projectId!)
   const navigate = useNavigate()
   const setCurrentProject = useAppStore(s => s.setCurrentProject)
+  const queryClient = useQueryClient()
 
   // Controlled tab
   const [activeTab, setActiveTab] = useState('overview')
+  const tabsRef = useRef<HTMLDivElement>(null)
+
+  // Path edit state
+  const [editingPath, setEditingPath] = useState(false)
+  const [pathValue, setPathValue] = useState('')
+  const [savingPath, setSavingPath] = useState(false)
 
   // Env vars state
   const [envVars, setEnvVars] = useState<EnvVar[]>([])
@@ -134,6 +144,30 @@ export function ProjectDetail() {
 
   const handleConfigure = () => {
     setActiveTab('config')
+    setTimeout(() => tabsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50)
+  }
+
+  const handleEditPath = () => {
+    setPathValue(project?.path ?? '')
+    setEditingPath(true)
+  }
+
+  const handleBrowsePath = async () => {
+    if (!window.electronAPI) return
+    const picked = await window.electronAPI.file.openProject()
+    if (picked) setPathValue(picked)
+  }
+
+  const handleSavePath = async () => {
+    if (!pathValue.trim() || !project) return
+    setSavingPath(true)
+    try {
+      await apiClient.updateProject(project.id, { path: pathValue.trim() })
+      await queryClient.invalidateQueries({ queryKey: ['project', projectId] })
+      setEditingPath(false)
+    } finally {
+      setSavingPath(false)
+    }
   }
 
   // ── Env Var helpers ───────────────────────────────────────────────────
@@ -280,7 +314,66 @@ export function ProjectDetail() {
             {project.description || 'No description'}
           </p>
           <div className="mt-2 flex items-center gap-2">
-            <Badge variant="outline">{project.path}</Badge>
+            {editingPath ? (
+              <>
+                <Input
+                  value={pathValue}
+                  onChange={e => setPathValue(e.target.value)}
+                  className="h-7 w-80 font-mono text-xs"
+                  placeholder="/path/to/project"
+                  disabled={savingPath}
+                />
+                {window.electronAPI && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    onClick={handleBrowsePath}
+                    disabled={savingPath}
+                  >
+                    <FolderOpen className="mr-1 h-3.5 w-3.5" />
+                    Browse
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  onClick={handleSavePath}
+                  disabled={savingPath || !pathValue.trim()}
+                >
+                  {savingPath ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                  )}
+                  <span className="ml-1">Save</span>
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  onClick={() => setEditingPath(false)}
+                  disabled={savingPath}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </>
+            ) : (
+              <>
+                <Badge variant="outline" className="font-mono text-xs">
+                  {project.path}
+                </Badge>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6"
+                  onClick={handleEditPath}
+                  title="Edit project path"
+                >
+                  <Pencil className="h-3 w-3" />
+                </Button>
+              </>
+            )}
           </div>
         </div>
         <div className="flex gap-2">
@@ -296,6 +389,7 @@ export function ProjectDetail() {
       </div>
 
       {/* Tabs */}
+      <div ref={tabsRef}>
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="overview">
@@ -556,6 +650,7 @@ export function ProjectDetail() {
           </Card>
         </TabsContent>
       </Tabs>
+      </div>
 
       {/* Scan Progress Modal */}
       <ScanProgressModal

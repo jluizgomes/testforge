@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -40,6 +40,8 @@ class ScanRequest(BaseModel):
 
 
 class ScanStatusResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     job_id: str
     status: ScanJobStatus
     progress: int
@@ -47,6 +49,22 @@ class ScanStatusResponse(BaseModel):
     entry_points_found: int
     tests_generated: int
     error_message: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _map_id(cls, data: Any) -> Any:
+        """Map ScanJob.id → job_id for the response schema."""
+        if hasattr(data, "id"):
+            return {
+                "job_id": str(data.id),
+                "status": data.status,
+                "progress": data.progress,
+                "files_found": data.files_found,
+                "entry_points_found": data.entry_points_found,
+                "tests_generated": data.tests_generated,
+                "error_message": data.error_message,
+            }
+        return data
 
 
 class GeneratedTestResponse(BaseModel):

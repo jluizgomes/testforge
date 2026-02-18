@@ -110,8 +110,8 @@ function setupIpcHandlers() {
 
   // File operations
   ipcMain.handle('file:open-project', async () => {
-    const win = mainWindow ?? undefined
-    const result = await dialog.showOpenDialog(win, {
+    // Parent window is optional; Electron accepts undefined at runtime
+    const result = await dialog.showOpenDialog(mainWindow as BrowserWindow, {
       properties: ['openDirectory'],
       title: 'Select Project Directory',
     })
