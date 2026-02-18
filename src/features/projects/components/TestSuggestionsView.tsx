@@ -21,7 +21,8 @@ import {
 import { cn } from '@/lib/utils'
 import { apiClient, type GeneratedTestItem } from '@/services/api-client'
 
-const MonacoEditor = lazy(() =>
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const MonacoEditor = lazy((): Promise<any> =>
   import('@monaco-editor/react').then((m) => ({ default: m.default })).catch(() => ({
     default: ({ value }: { value?: string }) => (
       <pre className="text-xs bg-zinc-950 text-zinc-300 p-4 rounded-md overflow-auto h-full whitespace-pre-wrap">

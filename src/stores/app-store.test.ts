@@ -73,8 +73,9 @@ describe('projects', () => {
     id: 'proj-1',
     name: 'Test Project',
     path: '/test',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    is_active: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
   }
 
   it('initial projects list is empty', () => {

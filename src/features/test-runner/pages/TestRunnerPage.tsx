@@ -44,7 +44,8 @@ import { useWebSocket } from '@/hooks/useWebSocket'
 import { useToast } from '@/components/ui/use-toast'
 
 // Lazy-load Monaco to avoid crashing if not installed yet
-const MonacoEditor = lazy(() =>
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const MonacoEditor = lazy((): Promise<any> =>
   import('@monaco-editor/react').then((m) => ({ default: m.default })).catch(() => ({
     default: () => (
       <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
@@ -785,7 +786,7 @@ export function TestRunnerPage() {
                     language="typescript"
                     theme={theme}
                     value={editorCode}
-                    onChange={(val) => setEditorCode(val ?? '')}
+                    onChange={(val: string | undefined) => setEditorCode(val ?? '')}
                     options={{
                       minimap: { enabled: false },
                       fontSize: 13,

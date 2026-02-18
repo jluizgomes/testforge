@@ -19,7 +19,8 @@ function mockFetch(body: unknown, status = 200) {
   } as Response)
 }
 
-let fetchSpy: ReturnType<typeof vi.spyOn>
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let fetchSpy: any
 
 beforeEach(() => {
   // Reset store backendUrl so we use the fallback URL

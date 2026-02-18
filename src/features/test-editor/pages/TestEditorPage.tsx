@@ -15,7 +15,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   Plus,
   X,
@@ -31,7 +30,8 @@ import { apiClient } from '@/services/api-client'
 import { useAppStore } from '@/stores/app-store'
 
 // Lazy-load Monaco to avoid crashing if not installed yet
-const MonacoEditor = lazy(() =>
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const MonacoEditor = lazy((): Promise<any> =>
   import('@monaco-editor/react').then((m) => ({ default: m.default })).catch(() => ({
     default: ({ value, onChange }: { value?: string; onChange?: (v: string) => void }) => (
       <textarea
@@ -290,7 +290,7 @@ export function TestEditorPage() {
         <CardContent className="flex flex-1 flex-col overflow-hidden p-0">
           {/* Tab bar */}
           <div className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1">
-            <ScrollArea orientation="horizontal" className="flex-1">
+            <ScrollArea className="flex-1">
               <div className="flex items-center gap-1">
                 {tabs.map(tab => (
                   <div
@@ -355,7 +355,7 @@ export function TestEditorPage() {
                 }
                 theme="vs-dark"
                 value={activeTab.content}
-                onChange={(val) => updateContent(val ?? '')}
+                onChange={(val: string | undefined) => updateContent(val ?? '')}
                 options={{
                   fontSize: 13,
                   minimap: { enabled: false },

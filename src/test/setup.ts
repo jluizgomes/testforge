@@ -1,3 +1,4 @@
+import { beforeAll, afterAll } from 'vitest'
 import '@testing-library/jest-dom'
 
 // Mock localStorage for Zustand persist middleware
