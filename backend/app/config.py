@@ -54,11 +54,6 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60 * 24  # 24 hours
     algorithm: str = "HS256"
 
-    # Authentication
-    auth_enabled: bool = True
-    admin_email: str = "admin@testforge.local"
-    admin_password: str = ""
-
     # Path mapping (host ↔ container)
     project_path_host_prefix: str = ""
     project_path_container_prefix: str = ""

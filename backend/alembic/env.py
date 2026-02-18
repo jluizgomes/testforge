@@ -22,7 +22,6 @@ from app.models import (  # noqa: F401
     ScanJob,
     GeneratedTest,
     ReportSchedule,
-    User,
 )
 
 # this is the Alembic Config object, which provides

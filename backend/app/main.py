@@ -14,45 +14,15 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from sqlalchemy import select as sa_select, text, update as sa_update
+from sqlalchemy import text, update as sa_update
 
 from app.api.v1 import router as api_v1_router
-from app.api.v1.auth import router as auth_router
 from app.config import settings
-from app.core.security.auth import get_current_user, hash_password
 from app.db.session import engine, init_db
 try:
     from app.ws import ws_progress_endpoint
 except Exception:
     ws_progress_endpoint = None  # type: ignore[assignment]
-
-
-async def _ensure_admin_user() -> None:
-    """Create the admin user on first boot if auth is enabled and admin_password is set."""
-    if not settings.auth_enabled or not settings.admin_password:
-        return
-
-    from app.db.session import async_session_factory
-    from app.models.user import User
-
-    logger = logging.getLogger("app.main")
-    async with async_session_factory() as db:
-        result = await db.execute(
-            sa_select(User).where(User.email == settings.admin_email).limit(1)
-        )
-        existing = result.scalar_one_or_none()
-        if existing:
-            return
-
-        admin = User(
-            email=settings.admin_email,
-            hashed_password=hash_password(settings.admin_password),
-            is_active=True,
-            is_admin=True,
-        )
-        db.add(admin)
-        await db.commit()
-        logger.info("Created admin user: %s", settings.admin_email)
 
 
 async def _recover_orphaned_jobs() -> None:
@@ -101,7 +71,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan context manager."""
     # Startup
     await init_db()
-    await _ensure_admin_user()
     await _recover_orphaned_jobs()
     yield
     # Shutdown
@@ -221,10 +190,7 @@ def create_application() -> FastAPI:
         async def ws_progress(websocket: WebSocket, job_type: str, job_id: str) -> None:
             await ws_progress_endpoint(websocket, job_type, job_id)
 
-    # Auth router (public — no auth required)
-    app.include_router(auth_router, prefix="/api/v1/auth")
-
-    # Include API routers (protected by get_current_user dependency)
+    # Include API routers
     app.include_router(api_v1_router, prefix="/api/v1")
 
     # Serve screenshot files captured by Playwright

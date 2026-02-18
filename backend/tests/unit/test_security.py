@@ -1,6 +1,6 @@
-"""Unit tests for the security modules: masking, encryption, auth.
+"""Unit tests for the security modules: masking, encryption.
 
-Total: 18 tests
+Total: 13 tests
 """
 
 from __future__ import annotations
@@ -99,43 +99,6 @@ class TestMaskForDisplay:
 
     def test_empty_returns_empty(self):
         assert mask_for_display("") == ""  # falsy → passthrough
-
-
-# ── Auth (password hashing + JWT) ─────────────────────────────────────────────
-
-from app.core.security.auth import (
-    create_access_token,
-    hash_password,
-    verify_password,
-)
-
-
-class TestPasswordHashing:
-    def test_hash_and_verify_success(self):
-        password = "Str0ng!Pass"
-        hashed = hash_password(password)
-        assert hashed != password
-        assert verify_password(password, hashed) is True
-
-    def test_wrong_password_fails(self):
-        hashed = hash_password("real-pass")
-        assert verify_password("wrong-pass", hashed) is False
-
-
-class TestJWT:
-    def test_create_token_returns_string(self):
-        token = create_access_token(data={"sub": "user-123"})
-        assert isinstance(token, str)
-        assert len(token) > 20
-
-    def test_token_can_be_decoded(self):
-        from jose import jwt
-        from app.config import settings
-
-        token = create_access_token(data={"sub": "user-456"})
-        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
-        assert payload["sub"] == "user-456"
-        assert "exp" in payload
 
 
 # ── Config validation ─────────────────────────────────────────────────────────

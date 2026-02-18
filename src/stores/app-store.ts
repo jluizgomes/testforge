@@ -12,25 +12,10 @@ export interface BackendStatus {
   error?: string
 }
 
-export interface AuthUser {
-  id: string
-  email: string
-  is_active: boolean
-  is_admin: boolean
-}
-
 interface AppState {
   // Theme
   theme: Theme
   setTheme: (theme: Theme) => void
-
-  // Auth
-  isAuthenticated: boolean
-  authUser: AuthUser | null
-  authChecked: boolean
-  setAuth: (user: AuthUser | null) => void
-  checkAuth: () => Promise<void>
-  logout: () => void
 
   // Backend
   backendStatus: BackendStatus
@@ -56,48 +41,10 @@ interface AppState {
 
 export const useAppStore = create<AppState>()(
   persist(
-    (set, _get) => ({
+    (set) => ({
       // Theme
       theme: 'dark',
       setTheme: theme => set({ theme }),
-
-      // Auth
-      isAuthenticated: false,
-      authUser: null,
-      authChecked: false,
-
-      setAuth: (user: AuthUser | null) =>
-        set({ authUser: user, isAuthenticated: user !== null, authChecked: true }),
-
-      checkAuth: async () => {
-        const { apiClient } = await import('@/services/api-client')
-        const token = apiClient.getToken()
-        if (!token) {
-          // No token — check if auth is even required (auth_enabled=false)
-          try {
-            const me = await apiClient.getMe()
-            // If getMe works without token, auth is disabled
-            set({ authUser: me, isAuthenticated: true, authChecked: true })
-          } catch {
-            set({ authUser: null, isAuthenticated: false, authChecked: true })
-          }
-          return
-        }
-        try {
-          const user = await apiClient.getMe()
-          set({ authUser: user, isAuthenticated: true, authChecked: true })
-        } catch {
-          apiClient.setToken(null)
-          set({ authUser: null, isAuthenticated: false, authChecked: true })
-        }
-      },
-
-      logout: () => {
-        import('@/services/api-client').then(({ apiClient }) => {
-          apiClient.logout()
-        })
-        set({ authUser: null, isAuthenticated: false })
-      },
 
       // Backend
       backendStatus: { status: 'stopped', port: null },

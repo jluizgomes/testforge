@@ -10,17 +10,8 @@ from uuid import uuid4
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.core.security.auth import get_current_user
 from app.db.session import get_db
 from app.main import app
-
-
-@pytest.fixture(autouse=True)
-def disable_auth():
-    """Disable JWT authentication for all tests by default."""
-    app.dependency_overrides[get_current_user] = lambda: None
-    yield
-    app.dependency_overrides.pop(get_current_user, None)
 
 
 # ── Database mock helpers ─────────────────────────────────────────────────────

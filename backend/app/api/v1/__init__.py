@@ -1,6 +1,6 @@
 """API v1 module."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 
 from app.api.v1.ai import router as ai_router
 from app.api.v1.projects import router as projects_router
@@ -10,10 +10,8 @@ from app.api.v1.scanner import router as scanner_router
 from app.api.v1.settings import router as settings_router
 from app.api.v1.test_runs import router as test_runs_router
 from app.api.v1.traces import router as traces_router
-from app.core.security.auth import get_current_user
 
-# All routes under this router require authentication (when auth_enabled=True)
-router = APIRouter(dependencies=[Depends(get_current_user)])
+router = APIRouter()
 
 router.include_router(projects_router, prefix="/projects", tags=["Projects"])
 router.include_router(test_runs_router, prefix="/projects/{project_id}/runs", tags=["Test Runs"])
