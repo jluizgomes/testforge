@@ -214,6 +214,8 @@ class ApiClient {
   private static readonly DEFAULT_BASE_URL = 'http://localhost:8000'
   private static readonly TOKEN_KEY = 'testforge_token'
 
+  onUnauthorized: (() => void) | null = null
+
   private getBaseUrl(): string {
     const storeUrl = useAppStore.getState().backendUrl
     if (storeUrl) return storeUrl
@@ -266,6 +268,10 @@ class ApiClient {
     this.setToken(null)
   }
 
+  async getMe(): Promise<{ id: string; email: string; is_active: boolean; is_admin: boolean }> {
+    return this.request('/api/v1/auth/me')
+  }
+
   // ── HTTP helper ──────────────────────────────────────────────────────────
 
   private async request<T>(
@@ -288,9 +294,10 @@ class ApiClient {
       headers,
     })
 
-    // Clear token on 401 (expired or invalid)
+    // Clear token on 401 (expired or invalid) and notify app
     if (response.status === 401) {
       this.setToken(null)
+      this.onUnauthorized?.()
     }
 
     if (!response.ok) {

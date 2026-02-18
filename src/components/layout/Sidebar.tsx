@@ -1,4 +1,4 @@
-import { Link, useLocation } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard,
   FolderKanban,
@@ -10,6 +10,7 @@ import {
   Settings,
   ChevronLeft,
   ChevronRight,
+  LogOut,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -33,7 +34,8 @@ const bottomNavigation = [
 
 export function Sidebar() {
   const location = useLocation()
-  const { sidebarCollapsed, setSidebarCollapsed, backendStatus } = useAppStore()
+  const navigate = useNavigate()
+  const { sidebarCollapsed, setSidebarCollapsed, backendStatus, authUser, logout } = useAppStore()
 
   const isActive = (href: string) => {
     if (href === '/dashboard') {
@@ -147,6 +149,33 @@ export function Sidebar() {
 
             return link
           })}
+
+          {/* User / Logout */}
+          {authUser && (() => {
+            const logoutBtn = (
+              <button
+                onClick={() => { logout(); navigate('/login', { replace: true }) }}
+                className={cn(
+                  'flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground',
+                  sidebarCollapsed && 'justify-center px-2'
+                )}
+              >
+                <LogOut className="h-5 w-5 shrink-0" />
+                {!sidebarCollapsed && <span>{authUser.email}</span>}
+              </button>
+            )
+
+            if (sidebarCollapsed) {
+              return (
+                <Tooltip>
+                  <TooltipTrigger asChild>{logoutBtn}</TooltipTrigger>
+                  <TooltipContent side="right">Logout ({authUser.email})</TooltipContent>
+                </Tooltip>
+              )
+            }
+
+            return logoutBtn
+          })()}
 
           {/* Backend Status */}
           <div
