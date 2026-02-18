@@ -36,6 +36,7 @@ class ProjectConfig(Base, UUIDMixin, TimestampMixin):
     test_timeout: Mapped[int] = mapped_column(default=30000)
     parallel_workers: Mapped[int] = mapped_column(default=1)
     retry_count: Mapped[int] = mapped_column(default=0)
+    browser: Mapped[str | None] = mapped_column(String(20))
 
     # Test credentials
     test_login_email: Mapped[str | None] = mapped_column(String(255))

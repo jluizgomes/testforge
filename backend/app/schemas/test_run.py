@@ -92,3 +92,24 @@ class TestRunResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     results: list[TestResultResponse] | None = None
+
+
+class TestRunListResponse(BaseModel):
+    """Schema for test run list (no results to avoid async lazy load)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    project_id: str
+    status: TestRunStatus
+    started_at: datetime | None
+    completed_at: datetime | None
+    total_tests: int
+    passed_tests: int
+    failed_tests: int
+    skipped_tests: int
+    duration_ms: int | None
+    config: dict | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime

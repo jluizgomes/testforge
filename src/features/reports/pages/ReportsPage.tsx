@@ -30,10 +30,14 @@ import {
   Loader2,
   CheckCircle2,
   XCircle,
+  ShieldCheck,
 } from 'lucide-react'
+import { Switch } from '@/components/ui/switch'
+import { Label } from '@/components/ui/label'
 import { formatDate, formatDuration } from '@/lib/utils'
-import { apiClient, type ReportSchedule, type TestRun } from '@/services/api-client'
+import { apiClient, type ReportSchedule, type TestRun, type CodeQualityResult } from '@/services/api-client'
 import { ScheduleReportDialog } from '../components/ScheduleReportDialog'
+import { CodeQualityView } from '../components/CodeQualityView'
 import { useProjects } from '@/features/projects/hooks/useProjects'
 import { useAppStore } from '@/stores/app-store'
 
@@ -67,6 +71,12 @@ export function ReportsPage() {
   const [loadingRuns, setLoadingRuns] = useState(false)
   const [generatingRunId, setGeneratingRunId] = useState<string | null>(null)
   const [reportFormat, setReportFormat] = useState<string>('html')
+
+  // Code Quality tab state
+  const [qualityRunId, setQualityRunId] = useState<string>('')
+  const [includeAI, setIncludeAI] = useState(false)
+  const [loadingQuality, setLoadingQuality] = useState(false)
+  const [qualityResult, setQualityResult] = useState<CodeQualityResult | null>(null)
 
   const activeProject = currentProject ?? projects[0] ?? null
 
@@ -120,6 +130,20 @@ export function ReportsPage() {
       // ignore
     } finally {
       setDeletingId(null)
+    }
+  }
+
+  const handleAnalyzeQuality = async () => {
+    if (!activeProject?.id || !qualityRunId) return
+    setLoadingQuality(true)
+    setQualityResult(null)
+    try {
+      const result = await apiClient.getCodeQuality(activeProject.id, qualityRunId, includeAI)
+      setQualityResult(result)
+    } catch {
+      // ignore — could show toast
+    } finally {
+      setLoadingQuality(false)
     }
   }
 
@@ -275,6 +299,10 @@ export function ReportsPage() {
             )}
           </TabsTrigger>
           <TabsTrigger value="templates">Templates</TabsTrigger>
+          <TabsTrigger value="quality" className="flex items-center gap-1.5">
+            <ShieldCheck className="h-3.5 w-3.5" />
+            Code Quality
+          </TabsTrigger>
         </TabsList>
 
         {/* ── Recent Runs ── */}
@@ -580,6 +608,84 @@ export function ReportsPage() {
               </Card>
             ))}
           </div>
+        </TabsContent>
+
+        {/* ── Code Quality ── */}
+        <TabsContent value="quality" className="mt-6">
+          <Card>
+            <CardHeader>
+              <div className="flex flex-wrap items-end gap-4">
+                <div className="flex-1 min-w-0">
+                  <CardTitle>Code Quality</CardTitle>
+                  <CardDescription className="mt-1">
+                    Rule-based insights and optional AI failure analysis for a test run
+                  </CardDescription>
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  {/* Run selector */}
+                  <Select
+                    value={qualityRunId}
+                    onValueChange={v => {
+                      setQualityRunId(v)
+                      setQualityResult(null)
+                    }}
+                  >
+                    <SelectTrigger className="w-52">
+                      <SelectValue placeholder="Select a run…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {runs.map(r => (
+                        <SelectItem key={r.id} value={r.id}>
+                          <span className="font-mono text-xs">#{r.id.slice(0, 12)}</span>
+                          <span className="ml-2 text-muted-foreground text-xs">
+                            {r.total_tests} tests · {r.status}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+
+                  {/* AI toggle */}
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="include-ai"
+                      checked={includeAI}
+                      onCheckedChange={setIncludeAI}
+                    />
+                    <Label htmlFor="include-ai" className="text-sm whitespace-nowrap">
+                      Include AI Analysis
+                    </Label>
+                  </div>
+
+                  {/* Analyze button */}
+                  <Button
+                    onClick={handleAnalyzeQuality}
+                    disabled={!qualityRunId || loadingQuality || !activeProject}
+                  >
+                    {loadingQuality ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <ShieldCheck className="mr-2 h-4 w-4" />
+                    )}
+                    {loadingQuality ? 'Analyzing…' : 'Analyze'}
+                  </Button>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {!activeProject ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <ShieldCheck className="h-16 w-16 text-muted-foreground opacity-30" />
+                  <h3 className="mt-4 text-lg font-semibold">No project selected</h3>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Select a project to analyze code quality.
+                  </p>
+                </div>
+              ) : (
+                <CodeQualityView result={qualityResult} loading={loadingQuality} />
+              )}
+            </CardContent>
+          </Card>
         </TabsContent>
       </Tabs>
 

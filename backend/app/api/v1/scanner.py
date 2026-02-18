@@ -42,6 +42,28 @@ _ROUTE_PATTERNS = [
     re.compile(r"@router\.(get|post|put|delete|patch)\s*\("),             # FastAPI router decorator
     re.compile(r"createBrowserRouter|<Route\s"),                           # React Router
 ]
+# Path segments that indicate database-related files
+_DATABASE_PATH_RE = re.compile(
+    r"(models?|migrations?|schema|repositor|dao|entit|seeds?|fixtures?|orm|database|prisma|typeorm|sequelize|knex)",
+    re.IGNORECASE,
+)
+
+
+def _classify_entry_point(ep: dict[str, Any]) -> str:
+    """Classify an entry point as 'backend', 'frontend', or 'database'."""
+    path = ep.get("path", "")
+    extension = ep.get("extension", Path(path).suffix)
+
+    # Frontend files (.ts, .tsx, .js, .jsx)
+    if extension in {".ts", ".tsx", ".js", ".jsx"}:
+        return "frontend"
+
+    # Database-related files (backend languages only)
+    if _DATABASE_PATH_RE.search(path):
+        return "database"
+
+    # Default: backend (.py, .go, .java, etc.)
+    return "backend"
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -61,6 +83,8 @@ class ScanStatusResponse(BaseModel):
     files_found: int
     entry_points_found: int
     tests_generated: int
+    entry_points_by_type: dict[str, int] = {}
+    tests_by_type: dict[str, int] = {}
     error_message: str | None = None
 
     @model_validator(mode="before")
@@ -68,14 +92,18 @@ class ScanStatusResponse(BaseModel):
     def _map_id(cls, data: Any) -> Any:
         """Map ScanJob.id → job_id for the response schema."""
         if hasattr(data, "id"):
+            ep = getattr(data, "entry_points_by_type", None)
+            tb = getattr(data, "_tests_by_type", None)
             return {
                 "job_id": str(data.id),
-                "status": data.status,
-                "progress": data.progress,
-                "files_found": data.files_found,
-                "entry_points_found": data.entry_points_found,
-                "tests_generated": data.tests_generated,
-                "error_message": data.error_message,
+                "status": getattr(data, "status", ScanJobStatus.PENDING),
+                "progress": int(getattr(data, "progress", 0)),
+                "files_found": int(getattr(data, "files_found", 0)),
+                "entry_points_found": int(getattr(data, "entry_points_found", 0)),
+                "tests_generated": int(getattr(data, "tests_generated", 0)),
+                "entry_points_by_type": ep if isinstance(ep, dict) else {},
+                "tests_by_type": tb if isinstance(tb, dict) else {},
+                "error_message": getattr(data, "error_message", None),
             }
         return data
 
@@ -385,7 +413,10 @@ def _find_entry_points_from_structure(structure: dict[str, Any]) -> list[dict[st
     return entry_points
 
 
-async def _broadcast_scan_progress(job: ScanJob) -> None:
+async def _broadcast_scan_progress(
+    job: ScanJob,
+    tests_by_type: dict[str, int] | None = None,
+) -> None:
     """Push scan progress to connected WebSocket clients."""
     if ws_manager is None:
         return
@@ -396,6 +427,8 @@ async def _broadcast_scan_progress(job: ScanJob) -> None:
             "files_found": job.files_found,
             "entry_points_found": job.entry_points_found,
             "tests_generated": job.tests_generated,
+            "entry_points_by_type": job.entry_points_by_type or {},
+            "tests_by_type": tests_by_type or {},
             "error_message": job.error_message,
         })
     except Exception:
@@ -458,7 +491,14 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                         "extension": ".py",
                     })
 
+            # Classify entry points by type (backend / frontend / database)
+            ep_type_counts: dict[str, int] = {"backend": 0, "frontend": 0, "database": 0}
+            for ep in entry_points:
+                ep["resource_type"] = _classify_entry_point(ep)
+                ep_type_counts[ep["resource_type"]] += 1
+
             job.entry_points_found = len(entry_points)
+            job.entry_points_by_type = ep_type_counts
             job.progress = 30
             await db.commit()
             await _broadcast_scan_progress(job)
@@ -509,6 +549,7 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
             # Group entry points by module
             groups = _group_entry_points(entry_points)
             generated_count = 0
+            tests_by_type: dict[str, int] = {"backend": 0, "frontend": 0, "database": 0}
             total_groups = len(groups)
 
             for group_idx, (group_name, group_eps) in enumerate(groups.items()):
@@ -527,9 +568,13 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                             relevant_set[key] = rel
                     relevant_endpoints = list(relevant_set.values()) or openapi_endpoints[:5]
 
-                # Determine test type from extensions in group
-                extensions = {ep.get("extension", "") for ep in group_eps}
-                test_type = "api" if ".py" in extensions else "e2e"
+                # Determine test type from resource types in group
+                resource_types = {ep.get("resource_type", "backend") for ep in group_eps}
+                if "database" in resource_types:
+                    test_type = "database"
+                else:
+                    extensions = {ep.get("extension", "") for ep in group_eps}
+                    test_type = "api" if ".py" in extensions else "e2e"
 
                 prompt = _build_rich_prompt(
                     entry_points=group_eps,
@@ -578,29 +623,46 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                 for idx, code in enumerate(tests):
                     ep_data = group_eps[idx] if idx < len(group_eps) else {}
                     ep_path = ep_data.get("path", group_name) if ep_data else group_name
+                    # Use the individual entry point's resource_type when available
+                    ep_test_type = test_type
+                    if ep_data:
+                        rt = ep_data.get("resource_type", "")
+                        if rt == "database":
+                            ep_test_type = "database"
+                        elif rt == "frontend":
+                            ep_test_type = "e2e"
+                        elif rt == "backend":
+                            ep_test_type = "api"
                     gt = GeneratedTest(
                         scan_job_id=job_id,
                         project_id=job.project_id,
                         test_name=f"Test: {Path(ep_path).stem}",
                         test_code=code,
-                        test_type=test_type,
+                        test_type=ep_test_type,
                         entry_point=ep_path,
                         content_hash=ep_data.get("content_hash"),
                         accepted=False,
                     )
                     db.add(gt)
                     generated_count += 1
+                    # Map test_type to category for counting
+                    if ep_test_type == "database":
+                        tests_by_type["database"] += 1
+                    elif ep_test_type == "e2e":
+                        tests_by_type["frontend"] += 1
+                    else:
+                        tests_by_type["backend"] += 1
 
                 job.progress = 30 + int((group_idx + 1) / min(total_groups, 10) * 60)
                 job.tests_generated = generated_count
                 await db.commit()
-                await _broadcast_scan_progress(job)
+                await _broadcast_scan_progress(job, tests_by_type=tests_by_type)
 
             job.status = ScanJobStatus.COMPLETED
             job.progress = 100
             job.tests_generated = generated_count
             await db.commit()
-            await _broadcast_scan_progress(job)
+            await _broadcast_scan_progress(job, tests_by_type=tests_by_type)
 
         except Exception as exc:
             logger.exception("Scan job %s failed: %s", job_id, exc)
@@ -652,54 +714,79 @@ test.describe('{name}', () => {{
 async def start_scan(
     request: ScanRequest,
     db: AsyncSession = Depends(get_db),
-) -> ScanJob:
+) -> ScanStatusResponse:
     """Start a background scan of the project to discover entry points and generate tests."""
-    # Verify project exists
-    proj_result = await db.execute(
-        select(Project).where(Project.id == request.project_id, Project.is_active == True)
-    )
-    project = proj_result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    try:
+        proj_result = await db.execute(
+            select(Project).where(Project.id == request.project_id, Project.is_active == True)
+        )
+        project = proj_result.scalar_one_or_none()
+        if not project:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    # Reject if a scan is already in progress for this project
-    active_result = await db.execute(
-        select(ScanJob.id).where(
-            ScanJob.project_id == request.project_id,
-            ScanJob.status.in_([
-                ScanJobStatus.PENDING,
-                ScanJobStatus.SCANNING,
-                ScanJobStatus.GENERATING,
-            ]),
-        ).limit(1)
-    )
-    if active_result.scalar_one_or_none():
+        active_result = await db.execute(
+            select(ScanJob.id).where(
+                ScanJob.project_id == request.project_id,
+                ScanJob.status.in_([
+                    ScanJobStatus.PENDING,
+                    ScanJobStatus.SCANNING,
+                    ScanJobStatus.GENERATING,
+                ]),
+            ).limit(1)
+        )
+        if active_result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A scan is already in progress for this project",
+            )
+
+        structure = request.pre_discovered_structure if isinstance(request.pre_discovered_structure, dict) else None
+        job = ScanJob(
+            project_id=request.project_id,
+            status=ScanJobStatus.PENDING,
+            progress=0,
+            discovered_structure=structure,
+        )
+        db.add(job)
+        await db.commit()
+        await db.refresh(job)
+
+        asyncio.create_task(
+            _run_scan(
+                job_id=job.id,
+                project_path=project.path,
+                structure=structure,
+            )
+        )
+
+        # Build response from scalars to avoid ORM lazy load / enum issues
+        status_val = getattr(job, "status", None)
+        if isinstance(status_val, str):
+            try:
+                status_val = ScanJobStatus(status_val)
+            except ValueError:
+                status_val = ScanJobStatus.PENDING
+        elif status_val is None:
+            status_val = ScanJobStatus.PENDING
+        return ScanStatusResponse(
+            job_id=str(job.id),
+            status=status_val,
+            progress=int(getattr(job, "progress", 0)),
+            files_found=int(getattr(job, "files_found", 0)),
+            entry_points_found=int(getattr(job, "entry_points_found", 0)),
+            tests_generated=int(getattr(job, "tests_generated", 0)),
+            entry_points_by_type=ep if isinstance(ep := getattr(job, "entry_points_by_type", None), dict) else {},
+            tests_by_type={},
+            error_message=getattr(job, "error_message", None),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("start_scan failed for project %s: %s", request.project_id, e)
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A scan is already in progress for this project",
-        )
-
-    # Create scan job
-    job = ScanJob(
-        project_id=request.project_id,
-        status=ScanJobStatus.PENDING,
-        progress=0,
-        discovered_structure=request.pre_discovered_structure,
-    )
-    db.add(job)
-    await db.commit()
-    await db.refresh(job)
-
-    # Fire background task (non-blocking)
-    asyncio.create_task(
-        _run_scan(
-            job_id=job.id,
-            project_path=project.path,
-            structure=request.pre_discovered_structure,
-        )
-    )
-
-    return job
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to start scan",
+        ) from e
 
 
 @router.get("/status/{job_id}", response_model=ScanStatusResponse)
@@ -713,6 +800,20 @@ async def get_scan_status(
 
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan job not found")
+
+    # Compute tests_by_type from generated tests
+    from sqlalchemy import func as sa_func
+
+    type_counts_result = await db.execute(
+        select(GeneratedTest.test_type, sa_func.count())
+        .where(GeneratedTest.scan_job_id == job_id)
+        .group_by(GeneratedTest.test_type)
+    )
+    type_map = {"api": "backend", "e2e": "frontend", "database": "database"}
+    tbt: dict[str, int] = {"backend": 0, "frontend": 0, "database": 0}
+    for test_type, cnt in type_counts_result.all():
+        tbt[type_map.get(test_type, "backend")] += cnt
+    job._tests_by_type = tbt  # type: ignore[attr-defined]
 
     return job
 
@@ -729,6 +830,64 @@ async def list_generated_tests(
         .order_by(GeneratedTest.created_at.desc())
     )
     return list(result.scalars().all())
+
+
+class ScanStatsResponse(BaseModel):
+    """Resource coverage stats from the latest scan."""
+
+    entry_points_by_type: dict[str, int] = {}
+    tests_by_type: dict[str, int] = {}
+    total_resources: int = 0
+    total_tests: int = 0
+
+
+@router.get("/stats/{project_id}", response_model=ScanStatsResponse)
+async def get_scan_stats(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> ScanStatsResponse:
+    """Get resource coverage stats from the latest completed scan."""
+    try:
+        job_result = await db.execute(
+            select(ScanJob)
+            .where(ScanJob.project_id == project_id, ScanJob.status == ScanJobStatus.COMPLETED)
+            .order_by(ScanJob.created_at.desc())
+            .limit(1)
+        )
+        job = job_result.scalar_one_or_none()
+    except Exception as e:
+        logger.warning("get_scan_stats job lookup failed for project %s: %s", project_id, e)
+        return ScanStatsResponse()
+
+    if not job:
+        return ScanStatsResponse()
+
+    ep_by_type = job.entry_points_by_type if isinstance(job.entry_points_by_type, dict) else {}
+
+    from sqlalchemy import func as sa_func
+
+    type_map = {"api": "backend", "e2e": "frontend", "database": "database"}
+    tbt: dict[str, int] = {"backend": 0, "frontend": 0, "database": 0}
+    try:
+        type_counts_result = await db.execute(
+            select(GeneratedTest.test_type, sa_func.count())
+            .where(GeneratedTest.project_id == project_id)
+            .group_by(GeneratedTest.test_type)
+        )
+        for row in type_counts_result.all():
+            test_type = row[0] if len(row) >= 1 else "backend"
+            cnt = int(row[1]) if len(row) >= 2 else 0
+            key = type_map.get(test_type, "backend")
+            tbt[key] = tbt.get(key, 0) + cnt
+    except Exception as e:
+        logger.warning("get_scan_stats type_counts failed for project %s: %s", project_id, e)
+
+    return ScanStatsResponse(
+        entry_points_by_type=ep_by_type,
+        tests_by_type=tbt,
+        total_resources=sum(v for v in ep_by_type.values() if isinstance(v, (int, float))),
+        total_tests=sum(tbt.values()),
+    )
 
 
 @router.patch("/generated-tests/{test_id}", response_model=GeneratedTestResponse)
@@ -790,7 +949,10 @@ async def export_accepted_tests(
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for t in tests:
             # Determine folder and extension based on test_type
-            if t.test_type == "api":
+            if t.test_type == "database":
+                folder = "database"
+                ext = ".test.py"
+            elif t.test_type == "api":
                 folder = "api"
                 ext = ".test.py"
             else:

@@ -9,6 +9,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Progress } from '@/components/ui/progress'
 import {
   CheckCircle2,
   XCircle,
@@ -17,6 +18,9 @@ import {
   Loader2,
   Trash2,
   Download,
+  Server,
+  Monitor,
+  Database,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { apiClient, type GeneratedTestItem } from '@/services/api-client'
@@ -36,6 +40,19 @@ interface TestSuggestionsViewProps {
   projectId: string
 }
 
+interface ScanStats {
+  entry_points_by_type: Record<string, number>
+  tests_by_type: Record<string, number>
+  total_resources: number
+  total_tests: number
+}
+
+const CATEGORY_META = [
+  { key: 'backend', label: 'Backend', icon: Server, color: 'text-blue-500', bg: 'bg-blue-500' },
+  { key: 'frontend', label: 'Frontend', icon: Monitor, color: 'text-green-500', bg: 'bg-green-500' },
+  { key: 'database', label: 'Database', icon: Database, color: 'text-amber-500', bg: 'bg-amber-500' },
+] as const
+
 export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
   const [tests, setTests] = useState<GeneratedTestItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -43,6 +60,8 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
   const [accepting, setAccepting] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
+  const [bulkLoading, setBulkLoading] = useState<'accept' | 'reject' | null>(null)
+  const [scanStats, setScanStats] = useState<ScanStats | null>(null)
 
   useEffect(() => {
     apiClient
@@ -52,6 +71,8 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
         if (items.length > 0) setSelected(items[0])
       })
       .finally(() => setLoading(false))
+
+    apiClient.getScanStats(projectId).then(setScanStats).catch(() => {/* ignore */})
   }, [projectId])
 
   const handleAccept = async (test: GeneratedTestItem, accepted: boolean) => {
@@ -81,6 +102,56 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
       })
     } finally {
       setDeleting(null)
+    }
+  }
+
+  const handleAcceptAll = async () => {
+    setBulkLoading('accept')
+    try {
+      const pending = tests.filter((t) => !t.accepted)
+      const results = await Promise.allSettled(
+        pending.map((t) => apiClient.acceptGeneratedTest(t.id, true))
+      )
+      const updated = results
+        .filter((r): r is PromiseFulfilledResult<GeneratedTestItem> => r.status === 'fulfilled')
+        .map((r) => r.value)
+      setTests((prev) =>
+        prev.map((t) => {
+          const u = updated.find((u) => u.id === t.id)
+          return u ?? t
+        })
+      )
+      if (selected) {
+        const u = updated.find((u) => u.id === selected.id)
+        if (u) setSelected(u)
+      }
+    } finally {
+      setBulkLoading(null)
+    }
+  }
+
+  const handleRejectAll = async () => {
+    setBulkLoading('reject')
+    try {
+      const accepted = tests.filter((t) => t.accepted)
+      const results = await Promise.allSettled(
+        accepted.map((t) => apiClient.acceptGeneratedTest(t.id, false))
+      )
+      const updated = results
+        .filter((r): r is PromiseFulfilledResult<GeneratedTestItem> => r.status === 'fulfilled')
+        .map((r) => r.value)
+      setTests((prev) =>
+        prev.map((t) => {
+          const u = updated.find((u) => u.id === t.id)
+          return u ?? t
+        })
+      )
+      if (selected) {
+        const u = updated.find((u) => u.id === selected.id)
+        if (u) setSelected(u)
+      }
+    } finally {
+      setBulkLoading(null)
     }
   }
 
@@ -123,7 +194,47 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
   const accepted = tests.filter((t) => t.accepted)
   const pending = tests.filter((t) => !t.accepted)
 
+  const hasStats = scanStats && scanStats.total_resources > 0
+
   return (
+    <div className="space-y-4">
+      {/* ── Resource Coverage Summary ── */}
+      {hasStats && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Resource Coverage</CardTitle>
+            <CardDescription>
+              {scanStats.total_tests} tests generated for {scanStats.total_resources} resources found
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-4 sm:grid-cols-3">
+              {CATEGORY_META.map(({ key, label, icon: Icon, color }) => {
+                const resources = scanStats.entry_points_by_type[key] ?? 0
+                const testsCount = scanStats.tests_by_type[key] ?? 0
+                if (resources === 0 && testsCount === 0) return null
+                const pct = resources > 0 ? Math.round((testsCount / resources) * 100) : 0
+                return (
+                  <div key={key} className="rounded-lg border p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Icon className={`h-4 w-4 ${color}`} />
+                        <span className="text-sm font-medium">{label}</span>
+                      </div>
+                      <span className="text-sm font-bold">{testsCount}/{resources}</span>
+                    </div>
+                    <Progress value={pct} className="h-2" />
+                    <p className="text-xs text-muted-foreground">
+                      {pct}% coverage · {resources} resources · {testsCount} tests
+                    </p>
+                  </div>
+                )
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
     <div className="grid gap-4 lg:grid-cols-5 h-[600px]">
       {/* ── Left: list ── */}
       <Card className="lg:col-span-2 flex flex-col">
@@ -154,6 +265,35 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
               </Button>
             )}
           </div>
+          <div className="flex gap-2 pt-1">
+            <Button
+              size="sm"
+              variant="outline"
+              className="flex-1 text-red-500 border-red-200 hover:bg-red-50"
+              disabled={accepted.length === 0 || bulkLoading !== null}
+              onClick={handleRejectAll}
+            >
+              {bulkLoading === 'reject' ? (
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <XCircle className="mr-1.5 h-3.5 w-3.5" />
+              )}
+              Reject All
+            </Button>
+            <Button
+              size="sm"
+              className="flex-1"
+              disabled={pending.length === 0 || bulkLoading !== null}
+              onClick={handleAcceptAll}
+            >
+              {bulkLoading === 'accept' ? (
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
+              )}
+              Accept All
+            </Button>
+          </div>
         </CardHeader>
         <CardContent className="p-0 flex-1 overflow-hidden">
           <ScrollArea className="h-full">
@@ -177,7 +317,7 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
                   <p className="text-sm font-medium truncate">{test.test_name}</p>
                   <div className="flex items-center gap-1 mt-0.5">
                     <Badge variant="secondary" className="text-xs px-1">
-                      {test.test_type}
+                      {test.test_type === 'api' ? 'Backend' : test.test_type === 'database' ? 'Database' : 'Frontend'}
                     </Badge>
                     {test.entry_point && (
                       <span className="text-xs text-muted-foreground truncate">
@@ -274,7 +414,7 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
             >
               <MonacoEditor
                 height="100%"
-                language={selected.test_type === 'api' ? 'python' : 'typescript'}
+                language={selected.test_type === 'e2e' ? 'typescript' : 'python'}
                 theme="vs-dark"
                 value={selected.test_code}
                 options={{
@@ -295,6 +435,7 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
           )}
         </CardContent>
       </Card>
+    </div>
     </div>
   )
 }

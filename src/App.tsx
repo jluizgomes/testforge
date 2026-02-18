@@ -31,6 +31,7 @@ function App() {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <Routes>
+        <Route path="/login" element={<Navigate to="/dashboard" replace />} />
         <Route path="/" element={<MainLayout />}>
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard" element={<Dashboard />} />
@@ -42,6 +43,7 @@ function App() {
           <Route path="reports" element={<ReportsPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>
+        <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>
       <Toaster />
     </div>

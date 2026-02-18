@@ -67,30 +67,35 @@ async def create_project(
     db.add(project)
     await db.flush()
 
-    # Create config if provided
+    config_created = None
     if project_in.config:
-        config = ProjectConfig(
+        config_created = ProjectConfig(
             project_id=project.id,
             frontend_url=project_in.config.frontend_url,
             backend_url=project_in.config.backend_url,
             openapi_url=project_in.config.openapi_url,
-            database_url=encrypt_value(project_in.config.database_url),
+            database_url=encrypt_value(project_in.config.database_url) if project_in.config.database_url else None,
             redis_url=project_in.config.redis_url,
             playwright_config=project_in.config.playwright_config,
             test_timeout=project_in.config.test_timeout,
             parallel_workers=project_in.config.parallel_workers,
             retry_count=project_in.config.retry_count,
             test_login_email=project_in.config.test_login_email,
-            test_login_password=encrypt_value(project_in.config.test_login_password),
+            test_login_password=encrypt_value(project_in.config.test_login_password) if project_in.config.test_login_password else None,
             ai_provider=project_in.config.ai_provider,
             ai_model=project_in.config.ai_model,
         )
-        db.add(config)
+        db.add(config_created)
         await db.flush()
-        project.config = config
 
     await db.commit()
     await db.refresh(project)
+    # Project has no ORM config relationship; set for ProjectResponse serialization
+    if config_created:
+        await db.refresh(config_created)
+        project.config = config_created
+    else:
+        project.config = None
 
     return project
 

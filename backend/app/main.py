@@ -91,34 +91,51 @@ def create_application() -> FastAPI:
 
     # CORS: ensure headers on every response (including 500) so browser doesn't block
     origins = list(settings.cors_origins)
+    # In development, allow any localhost origin so Vite (e.g. 5173) always works
+    cors_kw: dict[str, Any] = {
+        "allow_credentials": True,
+        "allow_methods": ["*"],
+        "allow_headers": ["*"],
+        "expose_headers": ["*"],
+    }
+    if settings.environment == "development":
+        cors_kw["allow_origin_regex"] = r"http://(localhost|127\.0\.0\.1)(:\d+)?"
+        cors_kw["allow_origins"] = origins  # still use list for explicit origins
+    else:
+        cors_kw["allow_origins"] = origins
 
     class EnsureCORSHeadersMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next: Callable) -> Response:
             response = await call_next(request)
             origin = request.headers.get("origin")
-            if origin and origin in origins and not response.headers.get("access-control-allow-origin"):
-                response.headers["Access-Control-Allow-Origin"] = origin
-                response.headers["Access-Control-Allow-Credentials"] = "true"
+            if origin and not response.headers.get("access-control-allow-origin"):
+                if origin in origins or (
+                    settings.environment == "development"
+                    and ("localhost" in origin or "127.0.0.1" in origin)
+                ):
+                    response.headers["Access-Control-Allow-Origin"] = origin
+                    response.headers["Access-Control-Allow-Credentials"] = "true"
             return response
 
     app.add_middleware(EnsureCORSHeadersMiddleware)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["*"],
-    )
+    app.add_middleware(CORSMiddleware, **cors_kw)
 
     @app.exception_handler(Exception)
-    async def unhandled_exception_handler(request: Any, exc: Exception) -> JSONResponse:
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> Response:
         """Return JSON 500 so CORS headers are applied to error responses."""
         logging.getLogger("app.main").exception("Unhandled exception: %s", exc)
-        return JSONResponse(
+        response = JSONResponse(
             status_code=500,
             content={"detail": "Internal server error"},
         )
+        origin = request.headers.get("origin")
+        if origin and (
+            origin in origins
+            or (settings.environment == "development" and ("localhost" in origin or "127.0.0.1" in origin))
+        ):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+        return response
 
     # Health check endpoint
     @app.get("/health", tags=["Health"])

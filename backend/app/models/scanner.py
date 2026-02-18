@@ -41,6 +41,9 @@ class ScanJob(Base, UUIDMixin, TimestampMixin):
     entry_points_found: Mapped[int] = mapped_column(Integer, default=0)
     tests_generated: Mapped[int] = mapped_column(Integer, default=0)
 
+    # Resource classification: {"backend": N, "frontend": N, "database": N}
+    entry_points_by_type: Mapped[dict | None] = mapped_column(JSON)
+
     # Discovered structure (provided by Electron pre-scan or built locally)
     discovered_structure: Mapped[dict | None] = mapped_column(JSON)
 

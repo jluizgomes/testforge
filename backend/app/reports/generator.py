@@ -47,6 +47,231 @@ class ReportGenerator:
             "performance": self._calculate_performance(results),
             "trends": self._calculate_trends([]),  # Would need historical data
             "recommendations": self._generate_recommendations(results, ai_analysis),
+            "code_quality": self._generate_code_quality(results),
+        }
+
+    def _generate_code_quality(
+        self,
+        results: list[dict[str, Any]],
+        ai_failure_analyses: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Generate code quality insights from test results."""
+        if not results:
+            return {
+                "quality_score": 100,
+                "grade": "A",
+                "summary": "No tests to analyze.",
+                "insights": [],
+                "patterns": [],
+                "failure_analyses": [],
+            }
+
+        failures = [r for r in results if r.get("status") in ["failed", "error"]]
+        total = len(results)
+        passed = total - len(failures)
+        pass_rate = (passed / total * 100) if total > 0 else 0.0
+
+        insights: list[dict[str, Any]] = []
+        warnings_count = 0
+        errors_count = 0
+
+        # ── Rule-based detections ──────────────────────────────────────────
+
+        # 1. Timeout errors
+        timeout_tests = [
+            r.get("test_name", "Unknown")
+            for r in failures
+            if "timeout" in (r.get("error_message") or "").lower()
+        ]
+        if timeout_tests:
+            insights.append({
+                "severity": "error",
+                "category": "Stability",
+                "title": "Test timeouts detected",
+                "description": (
+                    f"{len(timeout_tests)} test(s) timed out. This often indicates "
+                    "slow network, unresponsive UI elements, or missing async waits."
+                ),
+                "affected_tests": timeout_tests,
+                "fix": "Use waitForSelector / waitForResponse with explicit conditions; consider raising default timeout in playwright.config.",
+            })
+            errors_count += 1
+
+        # 2. Broken selectors
+        selector_keywords = {"selector", "element", "locator", "not found"}
+        selector_tests = [
+            r.get("test_name", "Unknown")
+            for r in failures
+            if any(kw in (r.get("error_message") or "").lower() for kw in selector_keywords)
+            and "timeout" not in (r.get("error_message") or "").lower()
+        ]
+        if selector_tests:
+            insights.append({
+                "severity": "error",
+                "category": "Selectors",
+                "title": "Broken or unstable selectors",
+                "description": (
+                    f"{len(selector_tests)} test(s) failed due to element not found. "
+                    "CSS class–based selectors break easily when UI changes."
+                ),
+                "affected_tests": selector_tests,
+                "fix": "Migrate to data-testid attributes (e.g., data-testid=\"submit-btn\") for stable, semantic selectors.",
+            })
+            errors_count += 1
+
+        # 3. Slow tests (> 10 s)
+        slow_tests = [
+            r.get("test_name", "Unknown")
+            for r in results
+            if (r.get("duration_ms") or 0) > 10_000
+        ]
+        if slow_tests:
+            insights.append({
+                "severity": "warning",
+                "category": "Performance",
+                "title": "Slow tests detected",
+                "description": (
+                    f"{len(slow_tests)} test(s) took longer than 10 seconds. "
+                    "Slow tests increase CI pipeline time and mask real failures."
+                ),
+                "affected_tests": slow_tests,
+                "fix": "Parallelize test execution, mock slow external dependencies, or split large test suites.",
+            })
+            warnings_count += 1
+
+        # 4. Missing coverage layers
+        all_layers = {"frontend", "backend", "database"}
+        present_layers = {r.get("test_layer", "frontend") for r in results}
+        missing_layers = all_layers - present_layers
+        if missing_layers:
+            insights.append({
+                "severity": "suggestion",
+                "category": "Coverage",
+                "title": "Missing test layers",
+                "description": (
+                    f"No tests found for layer(s): {', '.join(sorted(missing_layers))}. "
+                    "Full-stack coverage catches integration bugs early."
+                ),
+                "affected_tests": [],
+                "fix": f"Add {', '.join(sorted(missing_layers))} tests to improve coverage depth.",
+            })
+
+        # 5. Failing tests without error messages
+        no_message_tests = [
+            r.get("test_name", "Unknown")
+            for r in failures
+            if not r.get("error_message") and not r.get("error_stack")
+        ]
+        if no_message_tests:
+            insights.append({
+                "severity": "warning",
+                "category": "Diagnostics",
+                "title": "Failures without error messages",
+                "description": (
+                    f"{len(no_message_tests)} test(s) failed without an error message or stack trace, "
+                    "making debugging very difficult."
+                ),
+                "affected_tests": no_message_tests,
+                "fix": "Use descriptive assertion messages: expect(value, 'Expected login to succeed').toBeTruthy()",
+            })
+            warnings_count += 1
+
+        # 6. Duplicate test names
+        test_names = [r.get("test_name") for r in results if r.get("test_name")]
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for name in test_names:
+            if name in seen and name not in duplicates:
+                duplicates.append(name)
+            seen.add(name)
+        if duplicates:
+            insights.append({
+                "severity": "warning",
+                "category": "Maintainability",
+                "title": "Duplicate test names",
+                "description": (
+                    f"{len(duplicates)} test name(s) appear more than once. "
+                    "Duplicate names cause confusion in reports and CI output."
+                ),
+                "affected_tests": duplicates,
+                "fix": "Use unique, descriptive test names that reflect the user scenario being tested.",
+            })
+            warnings_count += 1
+
+        # ── Error patterns ─────────────────────────────────────────────────
+
+        pattern_defs = [
+            ("Timeout errors", lambda m: "timeout" in m.lower()),
+            ("Assertion failures", lambda m: "assert" in m.lower() or "expect" in m.lower()),
+            ("Network / API errors", lambda m: any(k in m.lower() for k in ("network", "fetch", "api", "http", "status"))),
+            ("Element not found", lambda m: any(k in m.lower() for k in ("element", "selector", "locator", "not found"))),
+            ("Authentication errors", lambda m: any(k in m.lower() for k in ("auth", "401", "403", "forbidden", "unauthorized"))),
+        ]
+
+        patterns: list[dict[str, Any]] = []
+        unmatched_failures: list[str] = []
+
+        for failure in failures:
+            msg = failure.get("error_message") or ""
+            matched = False
+            for pattern_name, predicate in pattern_defs:
+                if predicate(msg):
+                    # Find or create pattern entry
+                    existing = next((p for p in patterns if p["pattern"] == pattern_name), None)
+                    if existing:
+                        existing["count"] += 1
+                        existing["tests"].append(failure.get("test_name", "Unknown"))
+                    else:
+                        patterns.append({
+                            "pattern": pattern_name,
+                            "count": 1,
+                            "tests": [failure.get("test_name", "Unknown")],
+                        })
+                    matched = True
+                    break
+            if not matched:
+                unmatched_failures.append(failure.get("test_name", "Unknown"))
+
+        if unmatched_failures:
+            patterns.append({
+                "pattern": "Unknown errors",
+                "count": len(unmatched_failures),
+                "tests": unmatched_failures,
+            })
+
+        # Sort patterns by count descending
+        patterns.sort(key=lambda p: p["count"], reverse=True)
+
+        # ── Quality score ──────────────────────────────────────────────────
+
+        score = pass_rate - (errors_count * 5) - (warnings_count * 2)
+        score = max(0, min(100, int(score)))
+
+        if score >= 90:
+            grade = "A"
+        elif score >= 75:
+            grade = "B"
+        elif score >= 60:
+            grade = "C"
+        elif score >= 40:
+            grade = "D"
+        else:
+            grade = "F"
+
+        if score >= 80:
+            summary = f"Good quality — {pass_rate:.0f}% pass rate with {len(insights)} improvement opportunity(ies)."
+        elif score >= 60:
+            summary = f"Moderate quality — {pass_rate:.0f}% pass rate. Address {errors_count} error(s) to improve stability."
+        else:
+            summary = f"Low quality — {pass_rate:.0f}% pass rate. {errors_count} error(s) and {warnings_count} warning(s) require attention."
+
+        return {
+            "quality_score": score,
+            "grade": grade,
+            "summary": summary,
+            "insights": insights,
+            "patterns": patterns,
+            "failure_analyses": ai_failure_analyses or [],
         }
 
     def render_html(

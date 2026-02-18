@@ -67,6 +67,7 @@ export interface ProjectConfig {
   test_timeout?: number
   parallel_workers?: number
   retry_count?: number
+  browser?: string | null
   test_login_email?: string | null
   test_login_password?: string | null
   ai_provider?: string | null
@@ -183,6 +184,33 @@ export interface Trace {
   attributes: Record<string, unknown> | null
   created_at: string
   spans: Span[] | null
+}
+
+// ── Code Quality ──────────────────────────────────────────────────────────────
+
+export interface CodeQualityInsight {
+  severity: 'error' | 'warning' | 'suggestion'
+  category: string
+  title: string
+  description: string
+  affected_tests: string[]
+  fix: string
+}
+
+export interface FailureAnalysis {
+  test_name: string
+  root_cause?: string | null
+  suggestions: string[]
+  confidence: number
+}
+
+export interface CodeQualityResult {
+  quality_score: number
+  grade: string
+  summary: string
+  insights: CodeQualityInsight[]
+  patterns: { pattern: string; count: number; tests: string[] }[]
+  failure_analyses: FailureAnalysis[]
 }
 
 // ── Report Schedules ──────────────────────────────────────────────────────────
@@ -303,6 +331,12 @@ class ApiClient {
     })
   }
 
+  async deleteTestRun(projectId: string, runId: string): Promise<void> {
+    await this.request(`/api/v1/projects/${projectId}/runs/${runId}`, {
+      method: 'DELETE',
+    })
+  }
+
   async stopTestRun(projectId: string, runId: string): Promise<TestRun> {
     return this.request(`/api/v1/projects/${projectId}/runs/${runId}/stop`, {
       method: 'POST',
@@ -381,6 +415,21 @@ class ApiClient {
     return response.blob()
   }
 
+  async getCodeQuality(
+    projectId: string,
+    runId: string,
+    includeAI = false
+  ): Promise<CodeQualityResult> {
+    return this.request('/api/v1/reports/quality', {
+      method: 'POST',
+      body: JSON.stringify({
+        project_id: projectId,
+        run_id: runId,
+        include_ai_analysis: includeAI,
+      }),
+    })
+  }
+
   // ── Scanner ─────────────────────────────────────────────────────────────────
 
   async startScan(
@@ -403,9 +452,20 @@ class ApiClient {
     files_found: number
     entry_points_found: number
     tests_generated: number
+    entry_points_by_type: Record<string, number>
+    tests_by_type: Record<string, number>
     error_message?: string
   }> {
     return this.request(`/api/v1/scan/status/${jobId}`)
+  }
+
+  async getScanStats(projectId: string): Promise<{
+    entry_points_by_type: Record<string, number>
+    tests_by_type: Record<string, number>
+    total_resources: number
+    total_tests: number
+  }> {
+    return this.request(`/api/v1/scan/stats/${projectId}`)
   }
 
   async getGeneratedTests(projectId: string): Promise<GeneratedTestItem[]> {

@@ -9,7 +9,7 @@ import {
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Loader2, CheckCircle2, XCircle, FileSearch } from 'lucide-react'
+import { Loader2, CheckCircle2, XCircle, FileSearch, Server, Monitor, Database } from 'lucide-react'
 import { apiClient } from '@/services/api-client'
 import { useWebSocket } from '@/hooks/useWebSocket'
 
@@ -27,6 +27,8 @@ interface ScanState {
   filesFound: number
   entryPointsFound: number
   testsGenerated: number
+  entryPointsByType: Record<string, number>
+  testsByType: Record<string, number>
   errorMessage?: string
 }
 
@@ -37,6 +39,12 @@ const STATUS_LABELS: Record<string, string> = {
   completed: 'Scan complete!',
   failed: 'Scan failed',
 }
+
+const CATEGORY_META = [
+  { key: 'backend', label: 'Backend', icon: Server, color: 'text-blue-500' },
+  { key: 'frontend', label: 'Frontend', icon: Monitor, color: 'text-green-500' },
+  { key: 'database', label: 'Database', icon: Database, color: 'text-amber-500' },
+] as const
 
 export function ScanProgressModal({
   open,
@@ -52,6 +60,8 @@ export function ScanProgressModal({
     filesFound: 0,
     entryPointsFound: 0,
     testsGenerated: 0,
+    entryPointsByType: {},
+    testsByType: {},
   })
 
   const handleProgress = useCallback((data: Record<string, unknown>) => {
@@ -61,6 +71,8 @@ export function ScanProgressModal({
       filesFound: (data.files_found as number) ?? 0,
       entryPointsFound: (data.entry_points_found as number) ?? 0,
       testsGenerated: (data.tests_generated as number) ?? 0,
+      entryPointsByType: (data.entry_points_by_type as Record<string, number>) ?? {},
+      testsByType: (data.tests_by_type as Record<string, number>) ?? {},
       errorMessage: data.error_message as string | undefined,
     })
   }, [])
@@ -80,6 +92,7 @@ export function ScanProgressModal({
   })
 
   const isDone = state.status === 'completed' || state.status === 'failed'
+  const hasCategories = Object.values(state.entryPointsByType).some(v => v > 0)
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -113,19 +126,41 @@ export function ScanProgressModal({
             <p className="text-xs text-right text-muted-foreground">{state.progress}%</p>
           </div>
 
-          {/* Stats */}
-          <div className="grid grid-cols-3 gap-3 text-center">
-            {[
-              { label: 'Files Found', value: state.filesFound },
-              { label: 'Entry Points', value: state.entryPointsFound },
-              { label: 'Tests Generated', value: state.testsGenerated },
-            ].map(({ label, value }) => (
-              <div key={label} className="rounded-lg bg-muted p-3">
-                <p className="text-xl font-bold">{value}</p>
-                <p className="text-xs text-muted-foreground">{label}</p>
+          {/* Resource coverage by category */}
+          {hasCategories ? (
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Resources / Tests by Category
+              </p>
+              <div className="grid grid-cols-3 gap-3">
+                {CATEGORY_META.map(({ key, label, icon: Icon, color }) => {
+                  const resources = state.entryPointsByType[key] ?? 0
+                  const tests = state.testsByType[key] ?? 0
+                  if (resources === 0 && tests === 0) return null
+                  return (
+                    <div key={key} className="rounded-lg bg-muted p-3 text-center">
+                      <Icon className={`h-4 w-4 mx-auto mb-1 ${color}`} />
+                      <p className="text-lg font-bold">{tests}/{resources}</p>
+                      <p className="text-xs text-muted-foreground">{label}</p>
+                    </div>
+                  )
+                })}
               </div>
-            ))}
-          </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-3 gap-3 text-center">
+              {[
+                { label: 'Files Found', value: state.filesFound },
+                { label: 'Entry Points', value: state.entryPointsFound },
+                { label: 'Tests Generated', value: state.testsGenerated },
+              ].map(({ label, value }) => (
+                <div key={label} className="rounded-lg bg-muted p-3">
+                  <p className="text-xl font-bold">{value}</p>
+                  <p className="text-xs text-muted-foreground">{label}</p>
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* Phase badges */}
           <div className="flex gap-2 flex-wrap">

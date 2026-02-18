@@ -21,20 +21,20 @@ import { formatDate, formatDuration } from '@/lib/utils'
 import { apiClient } from '@/services/api-client'
 import type { TestRun, HealthData } from '@/services/api-client'
 import { useProjects } from '@/features/projects/hooks/useProjects'
-import { useAppStore } from '@/stores/app-store'
+
+interface RunWithProject extends TestRun {
+  projectName: string
+}
 
 export function Dashboard() {
-  const { projects } = useProjects()
-  const currentProject = useAppStore(s => s.currentProject)
-  const [runs, setRuns] = useState<TestRun[]>([])
+  const { projects, isLoading: projectsLoading } = useProjects()
+  const [runs, setRuns] = useState<RunWithProject[]>([])
   const [health, setHealth] = useState<HealthData | null>(null)
   const [runsLoading, setRunsLoading] = useState(false)
   const [healthLoading, setHealthLoading] = useState(true)
   const [healthError, setHealthError] = useState(false)
 
-  // Prefer currentProject from store, fall back to first available project
-  const activeProject = currentProject ?? projects[0] ?? null
-
+  // Fetch health once
   useEffect(() => {
     setHealthLoading(true)
     setHealthError(false)
@@ -45,15 +45,29 @@ export function Dashboard() {
       .finally(() => setHealthLoading(false))
   }, [])
 
+  // Fetch runs for all projects whenever the project list changes
   useEffect(() => {
-    if (!activeProject?.id) return
+    if (projectsLoading || projects.length === 0) return
     setRunsLoading(true)
-    apiClient
-      .getTestRuns(activeProject.id)
-      .then(r => setRuns(r.slice(0, 10)))
-      .catch(() => setRuns([]))
+    Promise.all(
+      projects.map(p =>
+        apiClient
+          .getTestRuns(p.id)
+          .then(r => r.map(run => ({ ...run, projectName: p.name })))
+          .catch(() => [] as RunWithProject[])
+      )
+    )
+      .then(perProject => {
+        const all = perProject
+          .flat()
+          .sort(
+            (a, b) =>
+              new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+          )
+        setRuns(all.slice(0, 20))
+      })
       .finally(() => setRunsLoading(false))
-  }, [activeProject?.id])
+  }, [projects, projectsLoading])
 
   // Aggregate stats from completed runs
   const completedRuns = runs.filter(
@@ -92,21 +106,16 @@ export function Dashboard() {
     },
   ]
 
+  const loading = runsLoading || projectsLoading
+
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">Dashboard</h1>
-          <p className="text-muted-foreground">
-            Overview of your test suite and recent activity
-          </p>
-        </div>
-        {activeProject && (
-          <Badge variant="secondary" className="text-sm">
-            {activeProject.name}
-          </Badge>
-        )}
+      <div>
+        <h1 className="text-3xl font-bold">Dashboard</h1>
+        <p className="text-muted-foreground">
+          Overview across all {projects.length > 0 ? `${projects.length} project${projects.length !== 1 ? 's' : ''}` : 'projects'}
+        </p>
       </div>
 
       {/* Stats Grid */}
@@ -117,7 +126,7 @@ export function Dashboard() {
             <Activity className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            {runsLoading ? (
+            {loading ? (
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             ) : (
               <>
@@ -139,7 +148,7 @@ export function Dashboard() {
             <TrendingUp className="h-4 w-4 text-success" />
           </CardHeader>
           <CardContent>
-            {runsLoading ? (
+            {loading ? (
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             ) : (
               <>
@@ -160,7 +169,7 @@ export function Dashboard() {
             <CheckCircle2 className="h-4 w-4 text-success" />
           </CardHeader>
           <CardContent>
-            {runsLoading ? (
+            {loading ? (
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             ) : (
               <>
@@ -183,7 +192,7 @@ export function Dashboard() {
             <XCircle className="h-4 w-4 text-destructive" />
           </CardHeader>
           <CardContent>
-            {runsLoading ? (
+            {loading ? (
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             ) : (
               <>
@@ -207,17 +216,10 @@ export function Dashboard() {
         <Card>
           <CardHeader>
             <CardTitle>Recent Test Runs</CardTitle>
-            <CardDescription>Latest test execution results</CardDescription>
+            <CardDescription>Latest executions across all projects</CardDescription>
           </CardHeader>
           <CardContent>
-            {!activeProject ? (
-              <div className="flex flex-col items-center justify-center py-8 text-center">
-                <Activity className="h-10 w-10 text-muted-foreground opacity-30" />
-                <p className="mt-2 text-sm text-muted-foreground">
-                  Create or select a project to see recent runs
-                </p>
-              </div>
-            ) : runsLoading ? (
+            {loading ? (
               <div className="flex items-center justify-center py-8 gap-2 text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 Loading runs…
@@ -227,7 +229,9 @@ export function Dashboard() {
                 <Activity className="h-10 w-10 text-muted-foreground opacity-30" />
                 <p className="mt-2 text-sm font-medium">No test runs yet</p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Start a run from the Test Runner page
+                  {projects.length === 0
+                    ? 'Create a project to get started'
+                    : 'Start a run from the Test Runner page'}
                 </p>
               </div>
             ) : (
@@ -238,7 +242,7 @@ export function Dashboard() {
                     className="flex items-center justify-between rounded-lg border p-3"
                   >
                     <div className="space-y-0.5">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-sm font-medium font-mono">
                           #{run.id.slice(0, 8)}
                         </span>
@@ -254,6 +258,9 @@ export function Dashboard() {
                           }
                         >
                           {run.status}
+                        </Badge>
+                        <Badge variant="outline" className="text-xs font-normal">
+                          {run.projectName}
                         </Badge>
                       </div>
                       <p className="text-xs text-muted-foreground">

@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 from app.db.session import get_db
 from app.models.project import Project
 from app.models.test_run import TestResult, TestRun, TestRunStatus
-from app.schemas.test_run import TestResultResponse, TestRunCreate, TestRunResponse, TestRunUpdate
+from app.schemas.test_run import TestResultResponse, TestRunCreate, TestRunListResponse, TestRunResponse, TestRunUpdate
 
 router = APIRouter()
 
@@ -34,14 +34,14 @@ async def get_project_or_404(
     return project
 
 
-@router.get("", response_model=list[TestRunResponse])
+@router.get("", response_model=list[TestRunListResponse])
 async def list_test_runs(
     project_id: str,
     skip: int = 0,
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
 ) -> list[TestRun]:
-    """List all test runs for a project."""
+    """List all test runs for a project (no results loaded to avoid async lazy load)."""
     await get_project_or_404(project_id, db)
 
     result = await db.execute(
@@ -95,17 +95,17 @@ async def create_test_run(
 async def get_test_run(
     project_id: str,
     run_id: str,
-    include_results: bool = False,
+    include_results: bool = True,
     db: AsyncSession = Depends(get_db),
 ) -> TestRun:
-    """Get a specific test run."""
+    """Get a specific test run (results always loaded to avoid async lazy load)."""
     await get_project_or_404(project_id, db)
 
-    query = select(TestRun).where(TestRun.id == run_id, TestRun.project_id == project_id)
-    if include_results:
-        query = query.options(selectinload(TestRun.results))
-
-    result = await db.execute(query)
+    result = await db.execute(
+        select(TestRun)
+        .where(TestRun.id == run_id, TestRun.project_id == project_id)
+        .options(selectinload(TestRun.results))
+    )
     test_run = result.scalar_one_or_none()
 
     if not test_run:

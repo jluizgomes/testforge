@@ -65,10 +65,11 @@ def _detect_runner(
     parallel_workers: int = 1,
     retry_count: int = 0,
     test_timeout: int = 30000,
+    browser: str | None = None,
 ) -> tuple[str, list[str]]:
     """Return (layer, command_parts) for the project at *project_path*.
 
-    Applies config-driven flags for parallelism, retries and timeout.
+    Applies config-driven flags for parallelism, retries, timeout and browser.
     """
     base = Path(project_path)
 
@@ -83,6 +84,8 @@ def _detect_runner(
                 cmd += [f"--retries={retry_count}"]
             if test_timeout != 30000:
                 cmd += [f"--timeout={test_timeout}"]
+            if browser and browser in ("chromium", "firefox", "webkit"):
+                cmd += [f"--project={browser}"]
             return "frontend", cmd
 
     # pytest
@@ -280,6 +283,7 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
             parallel_workers=config.parallel_workers if config else 1,
             retry_count=config.retry_count if config else 0,
             test_timeout=config.test_timeout if config else 30000,
+            browser=config.browser if config else None,
         )
     except RuntimeError as exc:
         test_run.status = TestRunStatus.FAILED
