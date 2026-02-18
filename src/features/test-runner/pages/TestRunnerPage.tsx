@@ -36,6 +36,7 @@ import {
   ChevronRight,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { ScreenshotModal } from '@/components/ScreenshotModal'
 import { useAppStore } from '@/stores/app-store'
 import { useProjects } from '@/features/projects/hooks/useProjects'
 import { apiClient, type TestResultItem, type NetworkRequest } from '@/services/api-client'
@@ -119,6 +120,9 @@ export function TestRunnerPage() {
   const [theme] = useState<'vs-dark' | 'light'>('vs-dark')
   const logsEndRef = useRef<HTMLDivElement>(null)
   const pollRef = useRef<number | null>(null)
+  const [screenshotModal, setScreenshotModal] = useState<{
+    url: string; name: string; status?: string; layer?: string
+  } | null>(null)
 
   // Auto-scroll logs
   useEffect(() => {
@@ -524,7 +528,15 @@ export function TestRunnerPage() {
                         <img
                           src={screenshotUrl(selectedResult.screenshot_path)}
                           alt="Test screenshot"
-                          className="rounded-md border max-h-48 object-contain"
+                          className="rounded-md border max-h-48 object-contain cursor-pointer hover:opacity-80 transition-opacity"
+                          onClick={() =>
+                            setScreenshotModal({
+                              url: screenshotUrl(selectedResult.screenshot_path!),
+                              name: selectedResult.test_name,
+                              status: selectedResult.status,
+                              layer: selectedResult.test_layer,
+                            })
+                          }
                         />
                       </div>
                     )}
@@ -558,9 +570,14 @@ export function TestRunnerPage() {
                       <img
                         src={screenshotUrl(r.screenshot_path!)}
                         alt={r.test_name}
-                        className="w-full h-40 object-cover rounded-md border cursor-pointer hover:opacity-90 transition-opacity"
+                        className="w-full h-40 object-cover rounded-md border cursor-pointer hover:opacity-80 transition-opacity"
                         onClick={() =>
-                          window.open(screenshotUrl(r.screenshot_path!), '_blank')
+                          setScreenshotModal({
+                            url: screenshotUrl(r.screenshot_path!),
+                            name: r.test_name,
+                            status: r.status,
+                            layer: r.test_layer,
+                          })
                         }
                       />
                       <div className="mt-1">
@@ -733,6 +750,16 @@ export function TestRunnerPage() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      {/* Screenshot zoom modal */}
+      <ScreenshotModal
+        open={!!screenshotModal}
+        onClose={() => setScreenshotModal(null)}
+        imageUrl={screenshotModal?.url ?? ''}
+        testName={screenshotModal?.name ?? ''}
+        testStatus={screenshotModal?.status}
+        testLayer={screenshotModal?.layer}
+      />
     </div>
   )
 }
