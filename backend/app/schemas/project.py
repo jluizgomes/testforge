@@ -17,6 +17,8 @@ class ProjectConfigBase(BaseModel):
     test_timeout: int = 30000
     parallel_workers: int = 1
     retry_count: int = 0
+    test_login_email: str | None = None
+    test_login_password: str | None = None
     ai_provider: str | None = None
     ai_model: str | None = None
 
@@ -39,6 +41,8 @@ class ProjectConfigUpdate(BaseModel):
     test_timeout: int | None = None
     parallel_workers: int | None = None
     retry_count: int | None = None
+    test_login_email: str | None = None
+    test_login_password: str | None = None
     ai_provider: str | None = None
     ai_model: str | None = None
 

@@ -67,6 +67,8 @@ export interface ProjectConfig {
   test_timeout?: number
   parallel_workers?: number
   retry_count?: number
+  test_login_email?: string | null
+  test_login_password?: string | null
   ai_provider?: string | null
   ai_model?: string | null
   created_at?: string
@@ -414,6 +416,13 @@ class ApiClient {
     return this.request(`/api/v1/scan/generated-tests/${testId}`, {
       method: 'PATCH',
       body: JSON.stringify({ accepted }),
+    })
+  }
+
+  async deleteGeneratedTest(testId: string): Promise<void> {
+    await fetch(`${this.getBaseUrl()}/api/v1/scan/generated-tests/${testId}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
     })
   }
 

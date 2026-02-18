@@ -15,6 +15,7 @@ import {
   FileCode2,
   Sparkles,
   Loader2,
+  Trash2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { apiClient, type GeneratedTestItem } from '@/services/api-client'
@@ -38,6 +39,7 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<GeneratedTestItem | null>(null)
   const [accepting, setAccepting] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState<string | null>(null)
 
   useEffect(() => {
     apiClient
@@ -57,6 +59,25 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
       if (selected?.id === test.id) setSelected(updated)
     } finally {
       setAccepting(null)
+    }
+  }
+
+  const handleDelete = async (test: GeneratedTestItem) => {
+    setDeleting(test.id)
+    try {
+      await apiClient.deleteGeneratedTest(test.id)
+      setTests((prev) => {
+        const remaining = prev.filter((t) => t.id !== test.id)
+        // Select next test if we deleted the selected one
+        if (selected?.id === test.id) {
+          const idx = prev.findIndex((t) => t.id === test.id)
+          const next = remaining[Math.min(idx, remaining.length - 1)] ?? null
+          setSelected(next)
+        }
+        return remaining
+      })
+    } finally {
+      setDeleting(null)
     }
   }
 
@@ -98,10 +119,10 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
         <CardContent className="p-0 flex-1 overflow-hidden">
           <ScrollArea className="h-full">
             {tests.map((test) => (
-              <button
+              <div
                 key={test.id}
                 className={cn(
-                  'w-full text-left px-4 py-3 border-b last:border-b-0 hover:bg-muted/50 transition-colors flex items-start gap-3',
+                  'group w-full text-left px-4 py-3 border-b last:border-b-0 hover:bg-muted/50 transition-colors flex items-start gap-3 cursor-pointer',
                   selected?.id === test.id && 'bg-muted'
                 )}
                 onClick={() => setSelected(test)}
@@ -126,7 +147,22 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
                     )}
                   </div>
                 </div>
-              </button>
+                <button
+                  className="opacity-0 group-hover:opacity-100 transition-opacity mt-0.5 flex-shrink-0 text-muted-foreground hover:text-destructive"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleDelete(test)
+                  }}
+                  disabled={deleting === test.id}
+                  title="Delete suggestion"
+                >
+                  {deleting === test.id ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              </div>
             ))}
           </ScrollArea>
         </CardContent>
@@ -148,6 +184,20 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
             </div>
             {selected && (
               <div className="flex gap-2 flex-shrink-0">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="text-destructive border-destructive/30 hover:bg-destructive/10"
+                  disabled={deleting === selected.id}
+                  onClick={() => handleDelete(selected)}
+                >
+                  {deleting === selected.id ? (
+                    <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="mr-1 h-3.5 w-3.5" />
+                  )}
+                  Delete
+                </Button>
                 <Button
                   size="sm"
                   variant="outline"

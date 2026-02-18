@@ -37,6 +37,10 @@ class ProjectConfig(Base, UUIDMixin, TimestampMixin):
     parallel_workers: Mapped[int] = mapped_column(default=1)
     retry_count: Mapped[int] = mapped_column(default=0)
 
+    # Test credentials
+    test_login_email: Mapped[str | None] = mapped_column(String(255))
+    test_login_password: Mapped[str | None] = mapped_column(String(255))
+
     # AI settings
     ai_provider: Mapped[str | None] = mapped_column(String(50))
     ai_model: Mapped[str | None] = mapped_column(String(100))

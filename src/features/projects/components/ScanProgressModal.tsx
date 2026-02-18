@@ -70,7 +70,7 @@ export function ScanProgressModal({
 
         if (res.status === 'completed') {
           if (pollRef.current) clearInterval(pollRef.current)
-          onComplete(jobId)
+          // Don't auto-close — let user see results and click "View Suggestions"
         } else if (res.status === 'failed') {
           if (pollRef.current) clearInterval(pollRef.current)
         }
@@ -164,10 +164,22 @@ export function ScanProgressModal({
 
           {/* Actions */}
           {isDone && (
-            <div className="flex justify-end">
-              <Button onClick={onClose} size="sm">
-                {state.status === 'completed' ? 'View Suggestions' : 'Close'}
-              </Button>
+            <div className="flex justify-end gap-2">
+              {state.status === 'failed' && (
+                <Button variant="outline" onClick={onClose} size="sm">
+                  Close
+                </Button>
+              )}
+              {state.status === 'completed' && (
+                <>
+                  <Button variant="outline" onClick={onClose} size="sm">
+                    Close
+                  </Button>
+                  <Button onClick={() => onComplete(jobId!)} size="sm">
+                    View Suggestions
+                  </Button>
+                </>
+              )}
             </div>
           )}
         </div>

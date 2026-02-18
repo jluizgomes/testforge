@@ -71,6 +71,8 @@ export function ProjectDetail() {
     database_url: '',
     openapi_url: '',
     redis_url: '',
+    test_login_email: '',
+    test_login_password: '',
   })
   const [savingConfig, setSavingConfig] = useState(false)
   const [configSaved, setConfigSaved] = useState(false)
@@ -113,6 +115,8 @@ export function ProjectDetail() {
       database_url: project.config?.database_url ?? '',
       openapi_url: project.config?.openapi_url ?? '',
       redis_url: project.config?.redis_url ?? '',
+      test_login_email: project.config?.test_login_email ?? '',
+      test_login_password: project.config?.test_login_password ?? '',
     })
   }, [project])
 
@@ -221,8 +225,12 @@ export function ProjectDetail() {
   }
 
   // ── Config URL save ───────────────────────────────────────────────────
+  // Config save error
+  const [configError, setConfigError] = useState<string | null>(null)
+
   const saveConfig = async () => {
     setSavingConfig(true)
+    setConfigError(null)
     try {
       await apiClient.updateProject(project.id, {
         config: {
@@ -231,10 +239,14 @@ export function ProjectDetail() {
           database_url: configEdits.database_url || undefined,
           openapi_url: configEdits.openapi_url || undefined,
           redis_url: configEdits.redis_url || undefined,
+          test_login_email: configEdits.test_login_email || undefined,
+          test_login_password: configEdits.test_login_password || undefined,
         },
       })
       setConfigSaved(true)
       setTimeout(() => setConfigSaved(false), 2500)
+    } catch (err) {
+      setConfigError(err instanceof Error ? err.message : 'Failed to save configuration')
     } finally {
       setSavingConfig(false)
     }
@@ -559,19 +571,22 @@ export function ProjectDetail() {
             <CardContent className="space-y-4">
               {(
                 [
-                  { label: 'Frontend URL', key: 'frontend_url', placeholder: 'http://localhost:3000' },
-                  { label: 'Backend URL', key: 'backend_url', placeholder: 'http://localhost:8000' },
-                  { label: 'OpenAPI Spec URL', key: 'openapi_url', placeholder: 'http://localhost:8000/openapi.json' },
-                  { label: 'Database URL', key: 'database_url', placeholder: 'postgresql://user:pass@localhost:5432/db' },
-                  { label: 'Redis URL', key: 'redis_url', placeholder: 'redis://localhost:6379' },
-                ] as const
-              ).map(({ label, key, placeholder }) => (
+                  { label: 'Frontend URL', key: 'frontend_url', placeholder: 'http://localhost:3000', type: 'text' },
+                  { label: 'Backend URL', key: 'backend_url', placeholder: 'http://localhost:8000', type: 'text' },
+                  { label: 'OpenAPI Spec URL', key: 'openapi_url', placeholder: 'http://localhost:8000/openapi.json', type: 'text' },
+                  { label: 'Database URL', key: 'database_url', placeholder: 'postgresql://user:pass@localhost:5432/db', type: 'text' },
+                  { label: 'Redis URL', key: 'redis_url', placeholder: 'redis://localhost:6379', type: 'text' },
+                  { label: 'Test Login Email', key: 'test_login_email', placeholder: 'test@example.com', type: 'text' },
+                  { label: 'Test Login Password', key: 'test_login_password', placeholder: '••••••••', type: 'password' },
+                ] as { label: string; key: keyof typeof configEdits; placeholder: string; type: string }[]
+              ).map(({ label, key, placeholder, type }) => (
                 <div key={key} className="space-y-1.5">
                   <Label htmlFor={`config-${key}`} className="text-sm font-medium">
                     {label}
                   </Label>
                   <Input
                     id={`config-${key}`}
+                    type={type}
                     value={configEdits[key]}
                     onChange={e =>
                       setConfigEdits(prev => ({ ...prev, [key]: e.target.value }))
@@ -581,6 +596,11 @@ export function ProjectDetail() {
                   />
                 </div>
               ))}
+              {configError && (
+                <p className="text-sm text-destructive bg-destructive/10 rounded p-2">
+                  {configError}
+                </p>
+              )}
             </CardContent>
           </Card>
 

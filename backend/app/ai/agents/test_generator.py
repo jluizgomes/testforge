@@ -13,6 +13,7 @@ class TestGeneratorState(TypedDict):
     project_id: str
     test_type: str
     context: str
+    project_context: dict[str, Any]
     generated_tests: list[str]
     review_feedback: str | None
     iteration: int
@@ -22,8 +23,8 @@ class TestGeneratorState(TypedDict):
 class TestGeneratorAgent:
     """Agent for generating tests using LangGraph-style state machine."""
 
-    SYSTEM_PROMPT = """You are an expert test engineer specializing in E2E testing.
-Your task is to generate high-quality, maintainable tests based on the provided context and requirements.
+    SYSTEM_PROMPT = """You are an expert test engineer specializing in E2E and API testing.
+Your task is to generate high-quality, maintainable, DISTINCT tests based on the provided context.
 
 Guidelines:
 1. Follow best practices for the test framework (Playwright for E2E, pytest for API)
@@ -32,6 +33,10 @@ Guidelines:
 4. Add comments explaining complex test logic
 5. Consider edge cases and error scenarios
 6. Make tests independent and idempotent
+7. ALWAYS use the REAL URLs, credentials, and endpoints provided in the project context
+8. NEVER use placeholder URLs like localhost:8000 or example.com unless those ARE the real URLs
+9. Each test MUST cover a DIFFERENT feature, endpoint, or user flow — NO duplicates
+10. If login credentials are provided, use them for authentication tests
 
 Output format:
 - For E2E tests: TypeScript with Playwright
@@ -42,6 +47,7 @@ Always include:
 - Clear test names describing what is being tested
 - Setup and teardown when needed
 - Meaningful assertions
+- Real URLs and endpoints from the project context
 """
 
     def __init__(
@@ -59,6 +65,7 @@ Always include:
         prompt: str,
         project_id: str,
         test_type: str = "e2e",
+        project_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Generate tests using the state machine."""
         # Initialize state
@@ -67,6 +74,7 @@ Always include:
             "project_id": project_id,
             "test_type": test_type,
             "context": "",
+            "project_context": project_context or {},
             "generated_tests": [],
             "review_feedback": None,
             "iteration": 0,
@@ -110,6 +118,37 @@ Context from the codebase:
 {state['context']}
 """
 
+        # Inject project context (URLs, credentials, endpoints)
+        pc = state["project_context"]
+        if pc:
+            context_lines = []
+            if pc.get("frontend_url"):
+                context_lines.append(f"Frontend URL: {pc['frontend_url']}")
+            if pc.get("backend_url"):
+                context_lines.append(f"Backend/API URL: {pc['backend_url']}")
+            if pc.get("test_login_email"):
+                context_lines.append(f"Test login email: {pc['test_login_email']}")
+            if pc.get("test_login_password"):
+                context_lines.append(f"Test login password: {pc['test_login_password']}")
+            if pc.get("openapi_endpoints"):
+                endpoints = pc["openapi_endpoints"]
+                ep_lines = []
+                for ep in endpoints[:10]:
+                    line = f"  {ep['method']} {ep['path']}"
+                    if ep.get("summary"):
+                        line += f" — {ep['summary']}"
+                    ep_lines.append(line)
+                context_lines.append("Available API endpoints:\n" + "\n".join(ep_lines))
+
+            if context_lines:
+                user_prompt += f"""
+
+PROJECT CONTEXT (use these real values in your tests):
+{chr(10).join(context_lines)}
+
+IMPORTANT: Use the URLs and credentials above instead of placeholder values.
+"""
+
         if state["review_feedback"]:
             user_prompt += f"""
 
@@ -141,6 +180,21 @@ Previous generated tests:
             state["review_feedback"] = "No tests were generated. Please try again."
             return state
 
+        # Build review context with project info
+        pc = state["project_context"]
+        url_check = ""
+        if pc:
+            real_urls = []
+            if pc.get("frontend_url"):
+                real_urls.append(pc["frontend_url"])
+            if pc.get("backend_url"):
+                real_urls.append(pc["backend_url"])
+            if real_urls:
+                url_check = (
+                    f"\n6. Tests use the real project URLs ({', '.join(real_urls)}) "
+                    "instead of placeholder values like localhost:8000"
+                )
+
         review_prompt = f"""Review the following generated tests for quality and correctness:
 
 ```
@@ -152,7 +206,8 @@ Check for:
 2. Missing assertions
 3. Poor selectors (avoid xpath, prefer data-testid)
 4. Missing error handling
-5. Test isolation issues
+5. Test isolation issues{url_check}
+7. Each test covers a DIFFERENT scenario (no duplicates)
 
 If the tests are good, respond with "APPROVED".
 If there are issues, list them clearly so they can be fixed.
