@@ -28,7 +28,7 @@ class ProjectConfig(Base, UUIDMixin, TimestampMixin):
     frontend_url: Mapped[str | None] = mapped_column(String(500))
     backend_url: Mapped[str | None] = mapped_column(String(500))
     openapi_url: Mapped[str | None] = mapped_column(String(500))
-    database_url: Mapped[str | None] = mapped_column(String(500))
+    database_url: Mapped[str | None] = mapped_column(String(1000))
     redis_url: Mapped[str | None] = mapped_column(String(500))
 
     # Test settings
@@ -39,7 +39,7 @@ class ProjectConfig(Base, UUIDMixin, TimestampMixin):
 
     # Test credentials
     test_login_email: Mapped[str | None] = mapped_column(String(255))
-    test_login_password: Mapped[str | None] = mapped_column(String(255))
+    test_login_password: Mapped[str | None] = mapped_column(String(500))
 
     # AI settings
     ai_provider: Mapped[str | None] = mapped_column(String(50))

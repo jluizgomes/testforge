@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.security.encryption import encrypt_value
 from app.db.session import get_db
 from app.models.project import Project, ProjectConfig
 from app.schemas.project import (
@@ -14,6 +15,15 @@ from app.schemas.project import (
 )
 
 router = APIRouter()
+
+_ENCRYPTED_FIELDS = {"test_login_password", "database_url"}
+
+
+def _encrypt_sensitive_fields(data: dict) -> None:
+    """Encrypt sensitive fields in-place before persisting."""
+    for field in _ENCRYPTED_FIELDS:
+        if field in data and data[field]:
+            data[field] = encrypt_value(data[field])
 
 
 @router.get("", response_model=list[ProjectResponse])
@@ -64,12 +74,14 @@ async def create_project(
             frontend_url=project_in.config.frontend_url,
             backend_url=project_in.config.backend_url,
             openapi_url=project_in.config.openapi_url,
-            database_url=project_in.config.database_url,
+            database_url=encrypt_value(project_in.config.database_url),
             redis_url=project_in.config.redis_url,
             playwright_config=project_in.config.playwright_config,
             test_timeout=project_in.config.test_timeout,
             parallel_workers=project_in.config.parallel_workers,
             retry_count=project_in.config.retry_count,
+            test_login_email=project_in.config.test_login_email,
+            test_login_password=encrypt_value(project_in.config.test_login_password),
             ai_provider=project_in.config.ai_provider,
             ai_model=project_in.config.ai_model,
         )
@@ -141,12 +153,15 @@ async def update_project(
 
         if config:
             config_data = project_in.config.model_dump(exclude_unset=True)
+            _encrypt_sensitive_fields(config_data)
             for field, value in config_data.items():
                 setattr(config, field, value)
         else:
+            config_data = project_in.config.model_dump(exclude_unset=True)
+            _encrypt_sensitive_fields(config_data)
             config = ProjectConfig(
                 project_id=project.id,
-                **project_in.config.model_dump(exclude_unset=True),
+                **config_data,
             )
             db.add(config)
 

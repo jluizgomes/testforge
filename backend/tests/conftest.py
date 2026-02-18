@@ -10,8 +10,17 @@ from uuid import uuid4
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.core.security.auth import get_current_user
 from app.db.session import get_db
 from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def disable_auth():
+    """Disable JWT authentication for all tests by default."""
+    app.dependency_overrides[get_current_user] = lambda: None
+    yield
+    app.dependency_overrides.pop(get_current_user, None)
 
 
 # ── Database mock helpers ─────────────────────────────────────────────────────
@@ -56,6 +65,8 @@ def make_project_config(*, project_id: str | None = None) -> MagicMock:
     c.test_timeout = 30000
     c.parallel_workers = 1
     c.retry_count = 0
+    c.test_login_email = None
+    c.test_login_password = None
     c.ai_provider = None
     c.ai_model = None
     c.created_at = _now()
@@ -69,12 +80,49 @@ def mock_db() -> MagicMock:
     session = MagicMock()
     session.execute = AsyncMock()
     session.add = MagicMock()
-    session.flush = AsyncMock()
+    async def _flush() -> None:
+        """Simulate flush by setting defaults on tracked objects."""
+        for call_args in session.add.call_args_list:
+            obj = call_args[0][0] if call_args[0] else None
+            if obj is None:
+                continue
+            if getattr(obj, "id", None) is None:
+                try:
+                    obj.id = str(uuid4())
+                except Exception:
+                    pass
+            if hasattr(obj, "is_active") and getattr(obj, "is_active", None) is None:
+                try:
+                    obj.is_active = True
+                except Exception:
+                    pass
+            if getattr(obj, "created_at", None) is None:
+                try:
+                    obj.created_at = _now()
+                except Exception:
+                    pass
+            if getattr(obj, "updated_at", None) is None:
+                try:
+                    obj.updated_at = _now()
+                except Exception:
+                    pass
+
+    session.flush = AsyncMock(side_effect=_flush)
     session.commit = AsyncMock()
     session.delete = AsyncMock()
 
-    # refresh sets timestamps on the object
+    # refresh sets timestamps and defaults on the object (mimics DB roundtrip)
     async def _refresh(obj: object) -> None:
+        if getattr(obj, "id", None) is None:
+            try:
+                obj.id = str(uuid4())  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        if getattr(obj, "is_active", None) is None:
+            try:
+                obj.is_active = True  # type: ignore[attr-defined]
+            except Exception:
+                pass
         if getattr(obj, "created_at", None) is None:
             try:
                 obj.created_at = _now()  # type: ignore[attr-defined]

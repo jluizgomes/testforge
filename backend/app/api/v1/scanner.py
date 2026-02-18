@@ -19,6 +19,8 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.security.encryption import decrypt_value
+from app.core.security.masking import mask_credential, mask_url
 from app.db.session import async_session_factory, get_db
 from app.models.project import Project, ProjectConfig
 from app.models.scanner import GeneratedTest, ScanJob, ScanJobStatus
@@ -263,17 +265,17 @@ def _build_rich_prompt(
         if config.backend_url:
             url_lines.append(f"  Backend/API URL: {config.backend_url}")
         if config.database_url:
-            url_lines.append(f"  Database URL: {config.database_url}")
+            url_lines.append(f"  Database URL: {mask_url(config.database_url)}")
         if url_lines:
             sections.append("Project URLs (use these in tests):\n" + "\n".join(url_lines))
 
-    # Test credentials
+    # Test credentials (masked — never send real passwords to LLM)
     if config and (config.test_login_email or config.test_login_password):
         cred_lines = []
         if config.test_login_email:
             cred_lines.append(f"  Email: {config.test_login_email}")
         if config.test_login_password:
-            cred_lines.append(f"  Password: {config.test_login_password}")
+            cred_lines.append(f"  Password: {mask_credential(config.test_login_password)}")
         sections.append("Test Login Credentials (use these for auth tests):\n" + "\n".join(cred_lines))
 
     # Environment variables (selected safe ones)
@@ -413,6 +415,13 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
             # ── Load project context ────────────────────────────────────────
             config = await _load_project_config(db, job.project_id)
 
+            # Decrypt sensitive fields in-memory for use during scan
+            if config:
+                if config.test_login_password:
+                    config.test_login_password = decrypt_value(config.test_login_password)
+                if config.database_url:
+                    config.database_url = decrypt_value(config.database_url)
+
             # Read .env from project directory
             dotenv_vars = _read_dotenv_from_project(project_path)
             # Merge with configured env vars (config overrides dotenv)
@@ -537,7 +546,7 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                     project_context["frontend_url"] = config.frontend_url
                     project_context["backend_url"] = config.backend_url
                     project_context["test_login_email"] = config.test_login_email
-                    project_context["test_login_password"] = config.test_login_password
+                    project_context["test_login_password"] = mask_credential(config.test_login_password)
                 if relevant_endpoints:
                     project_context["openapi_endpoints"] = relevant_endpoints
 

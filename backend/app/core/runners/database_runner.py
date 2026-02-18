@@ -1,11 +1,19 @@
 """Database test runner using SQLAlchemy."""
 
+import re
 import traceback
 from datetime import datetime
 from typing import Any, Callable
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.sql import quoted_name
+
+_TABLE_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,62}$")
+_FORBIDDEN_SQL_RE = re.compile(
+    r"^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE)\b",
+    re.IGNORECASE,
+)
 
 from app.core.runners.base import BaseRunner, RunnerConfig, TestResult, TestStatus
 
@@ -155,13 +163,21 @@ class DatabaseRunner(BaseRunner):
 
     async def get_table_row_count(self, table_name: str) -> int:
         """Get the row count of a table."""
-        query = f"SELECT COUNT(*) as count FROM {table_name};"
+        if not _TABLE_NAME_RE.match(table_name):
+            raise ValueError(f"Invalid table name: {table_name!r}")
+        safe_name = quoted_name(table_name, quote=True)
+        query = f"SELECT COUNT(*) as count FROM {safe_name};"
         result = await self.execute_query(query)
         return result[0]["count"] if result else 0
 
     async def explain_query(self, query: str) -> list[dict]:
-        """Get the execution plan for a query."""
-        explain_query = f"EXPLAIN ANALYZE {query}"
+        """Get the execution plan for a query (SELECT only)."""
+        stripped = query.strip()
+        if not stripped.upper().startswith("SELECT"):
+            raise ValueError("explain_query only accepts SELECT statements")
+        if _FORBIDDEN_SQL_RE.match(stripped):
+            raise ValueError("DDL/DML statements are not allowed in explain_query")
+        explain_query = f"EXPLAIN ANALYZE {stripped}"
         return await self.execute_query(explain_query)
 
     async def get_table_schema(self, table_name: str) -> list[dict]:

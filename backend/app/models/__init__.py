@@ -5,6 +5,7 @@ from app.models.report_schedule import ReportSchedule
 from app.models.scanner import GeneratedTest, ScanJob
 from app.models.test_run import TestResult, TestRun
 from app.models.trace import Span, Trace
+from app.models.user import User
 
 __all__ = [
     "Project",
@@ -16,4 +17,5 @@ __all__ = [
     "ScanJob",
     "GeneratedTest",
     "ReportSchedule",
+    "User",
 ]

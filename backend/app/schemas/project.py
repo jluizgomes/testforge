@@ -1,8 +1,14 @@
 """Pydantic schemas for Project."""
 
-from datetime import datetime
+from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.core.security.encryption import decrypt_value, mask_for_display
+from app.core.security.masking import mask_url
 
 
 class ProjectConfigBase(BaseModel):
@@ -56,6 +62,35 @@ class ProjectConfigResponse(ProjectConfigBase):
     project_id: str
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _mask_sensitive_fields(cls, data: Any) -> Any:
+        """Decrypt then mask sensitive fields for API responses."""
+        # Handle both ORM objects and dicts
+        if hasattr(data, "__dict__"):
+            # ORM object — work on a copy of attributes
+            password = getattr(data, "test_login_password", None)
+            if password:
+                decrypted = decrypt_value(password)
+                data.test_login_password = mask_for_display(decrypted)
+
+            db_url = getattr(data, "database_url", None)
+            if db_url:
+                decrypted_url = decrypt_value(db_url)
+                data.database_url = mask_url(decrypted_url)
+        elif isinstance(data, dict):
+            password = data.get("test_login_password")
+            if password:
+                decrypted = decrypt_value(password)
+                data["test_login_password"] = mask_for_display(decrypted)
+
+            db_url = data.get("database_url")
+            if db_url:
+                decrypted_url = decrypt_value(db_url)
+                data["database_url"] = mask_url(decrypted_url)
+
+        return data
 
 
 class ProjectBase(BaseModel):

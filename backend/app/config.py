@@ -4,8 +4,15 @@ import json
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import PostgresDsn, field_validator, ValidationInfo
+from pydantic import PostgresDsn, field_validator, model_validator, ValidationInfo
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_INSECURE_KEYS = frozenset({
+    "change-me-in-production-with-a-secure-random-key",
+    "dev-secret-key-change-in-production",
+    "secret",
+    "changeme",
+})
 
 
 class Settings(BaseSettings):
@@ -46,6 +53,32 @@ class Settings(BaseSettings):
     secret_key: str = "change-me-in-production-with-a-secure-random-key"
     access_token_expire_minutes: int = 60 * 24  # 24 hours
     algorithm: str = "HS256"
+
+    # Authentication
+    auth_enabled: bool = True
+    admin_email: str = "admin@testforge.local"
+    admin_password: str = ""
+
+    # Path mapping (host ↔ container)
+    project_path_host_prefix: str = ""
+    project_path_container_prefix: str = ""
+
+    @model_validator(mode="after")
+    def _validate_secret_key(self) -> "Settings":
+        """Reject insecure secret keys in production/staging."""
+        if self.environment in ("production", "staging"):
+            if self.secret_key in _INSECURE_KEYS:
+                raise ValueError(
+                    f"SECRET_KEY is a known default and MUST be changed for "
+                    f"environment={self.environment!r}. Generate one with: "
+                    f"python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+                )
+            if len(self.secret_key) < 32:
+                raise ValueError(
+                    f"SECRET_KEY must be at least 32 characters for "
+                    f"environment={self.environment!r} (got {len(self.secret_key)})"
+                )
+        return self
 
     # CORS
     cors_origins: list[str] = [

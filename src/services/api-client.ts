@@ -212,6 +212,7 @@ export interface CreateScheduleInput {
 
 class ApiClient {
   private static readonly DEFAULT_BASE_URL = 'http://localhost:8000'
+  private static readonly TOKEN_KEY = 'testforge_token'
 
   private getBaseUrl(): string {
     const storeUrl = useAppStore.getState().backendUrl
@@ -219,19 +220,78 @@ class ApiClient {
     return import.meta.env.VITE_API_URL || ApiClient.DEFAULT_BASE_URL
   }
 
+  // ── Token management ─────────────────────────────────────────────────────
+
+  getToken(): string | null {
+    try {
+      return localStorage.getItem(ApiClient.TOKEN_KEY)
+    } catch {
+      return null
+    }
+  }
+
+  setToken(token: string | null): void {
+    try {
+      if (token) {
+        localStorage.setItem(ApiClient.TOKEN_KEY, token)
+      } else {
+        localStorage.removeItem(ApiClient.TOKEN_KEY)
+      }
+    } catch {
+      // localStorage unavailable (e.g. in tests)
+    }
+  }
+
+  async login(email: string, password: string): Promise<{ access_token: string; token_type: string }> {
+    const url = `${this.getBaseUrl()}/api/v1/auth/token`
+    const body = new URLSearchParams({ username: email, password })
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    })
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.detail || `Login failed: ${response.status}`)
+    }
+
+    const data = await response.json()
+    this.setToken(data.access_token)
+    return data
+  }
+
+  logout(): void {
+    this.setToken(null)
+  }
+
+  // ── HTTP helper ──────────────────────────────────────────────────────────
+
   private async request<T>(
     endpoint: string,
     options: RequestInit = {}
   ): Promise<T> {
     const url = `${this.getBaseUrl()}${endpoint}`
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(options.headers as Record<string, string> || {}),
+    }
+
+    const token = this.getToken()
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`
+    }
 
     const response = await fetch(url, {
       ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...options.headers,
-      },
+      headers,
     })
+
+    // Clear token on 401 (expired or invalid)
+    if (response.status === 401) {
+      this.setToken(null)
+    }
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}))
@@ -362,11 +422,15 @@ class ApiClient {
     runId: string,
     format: 'html' | 'pdf' | 'json' | 'xml' | 'markdown'
   ): Promise<Blob> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    const token = this.getToken()
+    if (token) headers['Authorization'] = `Bearer ${token}`
+
     const response = await fetch(
       `${this.getBaseUrl()}/api/v1/reports/generate`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ project_id: projectId, run_id: runId, format }),
       }
     )
@@ -417,15 +481,24 @@ class ApiClient {
   }
 
   async deleteGeneratedTest(testId: string): Promise<void> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    const token = this.getToken()
+    if (token) headers['Authorization'] = `Bearer ${token}`
+
     await fetch(`${this.getBaseUrl()}/api/v1/scan/generated-tests/${testId}`, {
       method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
     })
   }
 
   async exportAcceptedTests(projectId: string): Promise<Blob> {
+    const headers: Record<string, string> = {}
+    const token = this.getToken()
+    if (token) headers['Authorization'] = `Bearer ${token}`
+
     const response = await fetch(
       `${this.getBaseUrl()}/api/v1/scan/export/${projectId}`,
+      { headers },
     )
     if (!response.ok) {
       const error = await response.json().catch(() => ({}))

@@ -129,7 +129,7 @@ Context from the codebase:
             if pc.get("test_login_email"):
                 context_lines.append(f"Test login email: {pc['test_login_email']}")
             if pc.get("test_login_password"):
-                context_lines.append(f"Test login password: {pc['test_login_password']}")
+                context_lines.append("Test login password: credentials configured (use env var or fixture)")
             if pc.get("openapi_endpoints"):
                 endpoints = pc["openapi_endpoints"]
                 ep_lines = []
