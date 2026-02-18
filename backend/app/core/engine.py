@@ -95,7 +95,11 @@ def _detect_runner(project_path: str) -> tuple[str, list[str]]:
 
 
 def _parse_playwright_output(raw: str) -> list[dict[str, Any]]:
-    """Parse Playwright --reporter=json stdout into a list of result dicts."""
+    """Parse Playwright --reporter=json stdout into a list of result dicts.
+
+    Handles nested suites (describe blocks inside describe blocks) by
+    walking the suite tree recursively.
+    """
     results: list[dict[str, Any]] = []
     try:
         data = json.loads(raw)
@@ -109,9 +113,16 @@ def _parse_playwright_output(raw: str) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             return results
 
-    for suite in data.get("suites", []):
-        file_path = suite.get("file", "")
-        suite_title = suite.get("title", "")
+    def _walk_suite(
+        suite: dict[str, Any],
+        file_path: str,
+        parent_title: str,
+    ) -> None:
+        title = suite.get("title", "")
+        suite_title = f"{parent_title} > {title}" if parent_title and title else (title or parent_title)
+        file_path = suite.get("file") or file_path
+
+        # Collect specs at this level
         for spec in suite.get("specs", []):
             spec_title = spec.get("title", "")
             for test in spec.get("tests", []):
@@ -137,6 +148,14 @@ def _parse_playwright_output(raw: str) -> list[dict[str, Any]]:
                             "error_stack": error.get("stack") if error else None,
                         }
                     )
+
+        # Recurse into child suites
+        for child in suite.get("suites", []):
+            _walk_suite(child, file_path, suite_title)
+
+    for suite in data.get("suites", []):
+        _walk_suite(suite, suite.get("file", ""), "")
+
     return results
 
 
