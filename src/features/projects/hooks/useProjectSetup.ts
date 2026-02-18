@@ -71,13 +71,10 @@ export function useProjectSetup() {
         return
       }
 
-      // For frontend/backend, try a simple fetch
+      // For frontend/backend, try a simple fetch. Any response (2xx, 4xx, 5xx) = server is there
       if (type !== 'database') {
-        await fetch(url, {
-          method: 'GET',
-          mode: 'no-cors',
-        })
-        // no-cors mode doesn't give us status, so we assume success if no error
+        await fetch(url, { method: 'GET' })
+        // Any response (2xx, 4xx, 5xx) means the host responded
         setConnectionStatus(prev => ({ ...prev, [type]: 'connected' }))
       } else {
         // For database, we'd need backend support

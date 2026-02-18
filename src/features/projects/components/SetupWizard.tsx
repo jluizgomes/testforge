@@ -20,9 +20,33 @@ import {
   Loader2,
   ArrowLeft,
   ArrowRight,
+  FileText,
 } from 'lucide-react'
 import { useToast } from '@/components/ui/use-toast'
 import { useProjectSetup } from '../hooks/useProjectSetup'
+
+// Maps common .env variable names to wizard config fields
+function extractUrlsFromEnv(vars: Record<string, string>) {
+  const first = (keys: string[]) => keys.map(k => vars[k]).find(v => !!v) ?? ''
+  return {
+    frontendUrl: first([
+      'FRONTEND_URL', 'NEXT_PUBLIC_URL', 'VITE_BASE_URL', 'APP_URL',
+      'BASE_URL', 'CLIENT_URL', 'NEXT_PUBLIC_SITE_URL',
+    ]),
+    backendUrl: first([
+      'API_URL', 'VITE_API_URL', 'BACKEND_URL', 'API_BASE_URL',
+      'SERVER_URL', 'NEXT_PUBLIC_API_URL', 'NEXT_PUBLIC_BACKEND_URL', 'SERVICE_URL',
+    ]),
+    openApiUrl: first([
+      'OPENAPI_URL', 'SWAGGER_URL', 'API_DOCS_URL', 'OPENAPI_SPEC_URL',
+    ]),
+    databaseUrl: first([
+      'DATABASE_URL', 'DB_URL', 'POSTGRES_URL', 'POSTGRESQL_URL',
+      'MONGODB_URI', 'MONGODB_URL', 'DB_CONNECTION',
+    ]),
+    redisUrl: first(['REDIS_URL', 'REDIS_URI']),
+  }
+}
 
 interface SetupWizardProps {
   onClose: () => void
@@ -40,6 +64,7 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
   const [currentStep, setCurrentStep] = useState(1)
   const [isScanning, setIsScanning] = useState(false)
   const [scanSummary, setScanSummary] = useState<string | null>(null)
+  const [envFilledFields, setEnvFilledFields] = useState<Set<string>>(new Set())
   const discoveredStructureRef = useRef<Record<string, unknown> | null>(null)
 
   const { toast } = useToast()
@@ -90,6 +115,29 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
     }
   }
 
+  const readAndApplyEnvVars = async (projectPath: string) => {
+    if (!window.electronAPI?.file?.readEnvFile) return
+    try {
+      const vars = await window.electronAPI.file.readEnvFile(projectPath)
+      if (!vars || Object.keys(vars).length === 0) return
+      const extracted = extractUrlsFromEnv(vars)
+      const filled = new Set<string>()
+      const updates: Partial<typeof config> = {}
+      for (const [field, value] of Object.entries(extracted) as [keyof typeof extracted, string][]) {
+        if (value) {
+          updates[field] = value
+          filled.add(field)
+        }
+      }
+      if (filled.size > 0) {
+        updateConfig(updates)
+        setEnvFilledFields(filled)
+      }
+    } catch {
+      // .env not found or unreadable — silently ignore
+    }
+  }
+
   const selectProjectPath = async () => {
     if (typeof window === 'undefined' || !window.electronAPI?.file?.openProject) {
       toast({
@@ -103,7 +151,9 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
       const projectPath = await window.electronAPI.file.openProject()
       if (projectPath) {
         updateConfig({ path: projectPath })
+        setEnvFilledFields(new Set())
         triggerProjectScan(projectPath)
+        readAndApplyEnvVars(projectPath)
       }
     } catch (err) {
       toast({
@@ -193,7 +243,11 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
                     value={config.path}
                     onChange={e => {
                       updateConfig({ path: e.target.value })
-                      if (e.target.value.length > 3) triggerProjectScan(e.target.value)
+                      setEnvFilledFields(new Set())
+                      if (e.target.value.length > 3) {
+                        triggerProjectScan(e.target.value)
+                        readAndApplyEnvVars(e.target.value)
+                      }
                     }}
                     placeholder="/path/to/project"
                   />
@@ -215,6 +269,12 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
                     {scanSummary}
                   </div>
                 )}
+                {!isScanning && envFilledFields.size > 0 && (
+                  <div className="flex items-center gap-1.5 text-xs text-emerald-600">
+                    <FileText className="h-3 w-3" />
+                    Auto-filled {envFilledFields.size} field{envFilledFields.size > 1 ? 's' : ''} from .env
+                  </div>
+                )}
               </div>
             </>
           )}
@@ -223,13 +283,24 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
           {currentStep === 2 && (
             <>
               <div className="space-y-2">
-                <Label htmlFor="frontendUrl">Frontend URL</Label>
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="frontendUrl">Frontend URL</Label>
+                  {envFilledFields.has('frontendUrl') && (
+                    <span className="flex items-center gap-1 text-[11px] text-emerald-600">
+                      <FileText className="h-3 w-3" />
+                      From .env
+                    </span>
+                  )}
+                </div>
                 <div className="flex gap-2">
                   <Input
                     id="frontendUrl"
                     value={config.frontendUrl}
-                    onChange={e => updateConfig({ frontendUrl: e.target.value })}
-                    placeholder="http://jluizgomes.local:3000"
+                    onChange={e => {
+                      updateConfig({ frontendUrl: e.target.value })
+                      setEnvFilledFields(prev => { const s = new Set(prev); s.delete('frontendUrl'); return s })
+                    }}
+                    placeholder="http://localhost:3000"
                   />
                   <Button
                     variant="outline"
@@ -255,13 +326,24 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
           {currentStep === 3 && (
             <>
               <div className="space-y-2">
-                <Label htmlFor="backendUrl">Backend API URL</Label>
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="backendUrl">Backend API URL</Label>
+                  {envFilledFields.has('backendUrl') && (
+                    <span className="flex items-center gap-1 text-[11px] text-emerald-600">
+                      <FileText className="h-3 w-3" />
+                      From .env
+                    </span>
+                  )}
+                </div>
                 <div className="flex gap-2">
                   <Input
                     id="backendUrl"
                     value={config.backendUrl}
-                    onChange={e => updateConfig({ backendUrl: e.target.value })}
-                    placeholder="http://jluizgomes.local:8000"
+                    onChange={e => {
+                      updateConfig({ backendUrl: e.target.value })
+                      setEnvFilledFields(prev => { const s = new Set(prev); s.delete('backendUrl'); return s })
+                    }}
+                    placeholder="http://localhost:8000"
                   />
                   <Button
                     variant="outline"
@@ -281,12 +363,23 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
                 </div>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="openApiUrl">OpenAPI Spec URL (optional)</Label>
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="openApiUrl">OpenAPI Spec URL (optional)</Label>
+                  {envFilledFields.has('openApiUrl') && (
+                    <span className="flex items-center gap-1 text-[11px] text-emerald-600">
+                      <FileText className="h-3 w-3" />
+                      From .env
+                    </span>
+                  )}
+                </div>
                 <Input
                   id="openApiUrl"
                   value={config.openApiUrl}
-                  onChange={e => updateConfig({ openApiUrl: e.target.value })}
-                  placeholder="http://jluizgomes.local:8000/openapi.json"
+                  onChange={e => {
+                    updateConfig({ openApiUrl: e.target.value })
+                    setEnvFilledFields(prev => { const s = new Set(prev); s.delete('openApiUrl'); return s })
+                  }}
+                  placeholder="http://localhost:8000/openapi.json"
                 />
               </div>
             </>
@@ -296,13 +389,24 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
           {currentStep === 4 && (
             <>
               <div className="space-y-2">
-                <Label htmlFor="databaseUrl">Database URL</Label>
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="databaseUrl">Database URL</Label>
+                  {envFilledFields.has('databaseUrl') && (
+                    <span className="flex items-center gap-1 text-[11px] text-emerald-600">
+                      <FileText className="h-3 w-3" />
+                      From .env
+                    </span>
+                  )}
+                </div>
                 <div className="flex gap-2">
                   <Input
                     id="databaseUrl"
                     value={config.databaseUrl}
-                    onChange={e => updateConfig({ databaseUrl: e.target.value })}
-                    placeholder="postgresql://user:pass@jluizgomes.local:5432/db"
+                    onChange={e => {
+                      updateConfig({ databaseUrl: e.target.value })
+                      setEnvFilledFields(prev => { const s = new Set(prev); s.delete('databaseUrl'); return s })
+                    }}
+                    placeholder="postgresql://user:pass@localhost:5432/db"
                   />
                   <Button
                     variant="outline"
@@ -322,12 +426,23 @@ export function SetupWizard({ onClose }: SetupWizardProps) {
                 </div>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="redisUrl">Redis URL (optional)</Label>
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="redisUrl">Redis URL (optional)</Label>
+                  {envFilledFields.has('redisUrl') && (
+                    <span className="flex items-center gap-1 text-[11px] text-emerald-600">
+                      <FileText className="h-3 w-3" />
+                      From .env
+                    </span>
+                  )}
+                </div>
                 <Input
                   id="redisUrl"
                   value={config.redisUrl}
-                  onChange={e => updateConfig({ redisUrl: e.target.value })}
-                  placeholder="redis://jluizgomes.local:6379"
+                  onChange={e => {
+                    updateConfig({ redisUrl: e.target.value })
+                    setEnvFilledFields(prev => { const s = new Set(prev); s.delete('redisUrl'); return s })
+                  }}
+                  placeholder="redis://localhost:6379"
                 />
               </div>
             </>
