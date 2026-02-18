@@ -71,6 +71,14 @@ export function ProjectDetail() {
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [scanning, setScanning] = useState(false)
 
+  // Auto-show suggestions if previous scan results exist
+  useEffect(() => {
+    if (!projectId || showSuggestions) return
+    apiClient.getGeneratedTests(projectId).then(tests => {
+      if (tests.length > 0) setShowSuggestions(true)
+    }).catch(() => {/* ignore */})
+  }, [projectId, showSuggestions])
+
   // Test runs for overview stats
   const { data: testRuns = [], isLoading: runsLoading } = useQuery({
     queryKey: ['test-runs', projectId],

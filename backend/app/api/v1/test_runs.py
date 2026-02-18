@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -59,9 +59,12 @@ async def list_test_runs(
 async def create_test_run(
     project_id: str,
     run_in: TestRunCreate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> TestRun:
-    """Start a new test run."""
+    """Start a new test run and launch execution in the background."""
+    from app.core.engine import run_tests_for_project
+
     await get_project_or_404(project_id, db)
 
     test_run = TestRun(
@@ -73,6 +76,9 @@ async def create_test_run(
     db.add(test_run)
     await db.commit()
     await db.refresh(test_run)
+
+    # Launch test execution in the background (non-blocking)
+    background_tasks.add_task(run_tests_for_project, project_id, str(test_run.id))
 
     return test_run
 
