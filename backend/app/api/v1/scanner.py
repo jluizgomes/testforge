@@ -155,7 +155,9 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                 entry_points = _find_entry_points_from_structure(structure)
                 job.files_found = structure.get("total_files", len(entry_points))
             else:
+                logger.info("scan: scanning path=%r", project_path)
                 entry_points = _find_entry_points_from_fs(project_path)
+                logger.info("scan: found %d entry points", len(entry_points))
                 job.files_found = len(entry_points)
 
             job.entry_points_found = len(entry_points)

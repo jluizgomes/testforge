@@ -23,6 +23,10 @@ services:
       - "8000:8000"
     networks:
       - core_net
+    volumes:
+      # Map server home to Mac-style paths so stored project paths resolve inside the container
+      - /home/jluizgomes:/Users/jluizgomes:ro
+      - /home/jluizgomes/Documents:/Volumes/Documents:ro
     command: ["./entrypoint.sh", "--reload"]
 
 networks:
