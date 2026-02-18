@@ -99,10 +99,6 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
-    # Docker: map host project path to container path (e.g. host /Users/you/projects → /workspace)
-    project_path_host_prefix: str = ""
-    project_path_container_prefix: str = ""
-
 
 @lru_cache
 def get_settings() -> Settings:

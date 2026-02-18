@@ -59,21 +59,44 @@ def cancel_run(run_id: str) -> bool:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _detect_runner(project_path: str) -> tuple[str, list[str]]:
-    """Return (layer, command_parts) for the project at *project_path*."""
+def _detect_runner(
+    project_path: str,
+    *,
+    parallel_workers: int = 1,
+    retry_count: int = 0,
+    test_timeout: int = 30000,
+) -> tuple[str, list[str]]:
+    """Return (layer, command_parts) for the project at *project_path*.
+
+    Applies config-driven flags for parallelism, retries and timeout.
+    """
     base = Path(project_path)
 
     # Playwright (TypeScript / JavaScript)
     for cfg in ("playwright.config.ts", "playwright.config.js", "playwright.config.mjs"):
         if (base / cfg).exists():
             npx = shutil.which("npx") or "npx"
-            return "frontend", [npx, "playwright", "test", "--reporter=json"]
+            cmd = [npx, "playwright", "test", "--reporter=json"]
+            if parallel_workers > 1:
+                cmd += [f"--workers={parallel_workers}"]
+            if retry_count > 0:
+                cmd += [f"--retries={retry_count}"]
+            if test_timeout != 30000:
+                cmd += [f"--timeout={test_timeout}"]
+            return "frontend", cmd
 
     # pytest
     for cfg in ("pyproject.toml", "setup.cfg", "pytest.ini", "conftest.py"):
         if (base / cfg).exists():
             pytest_bin = shutil.which("pytest") or "pytest"
-            return "backend", [pytest_bin, "--json-report", "--json-report-file=-", "-q"]
+            cmd = [pytest_bin, "--json-report", "--json-report-file=-", "-q"]
+            if parallel_workers > 1:
+                cmd += ["-n", str(parallel_workers)]
+            if retry_count > 0:
+                cmd += [f"--count={retry_count}"]
+            if test_timeout != 30000:
+                cmd += [f"--timeout={test_timeout // 1000}"]
+            return "backend", cmd
 
     # package.json test script
     pkg = base / "package.json"
@@ -232,9 +255,10 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
 
     project_path = project.path
     # When running in Docker, rewrite host path to container path if mapping is set
-    hp, cp = settings.project_path_host_prefix.strip(), settings.project_path_container_prefix.strip()
+    hp = settings.project_path_host_prefix.strip()
+    cp = settings.project_path_container_prefix.strip()
     if hp and cp and project_path.startswith(hp):
-        project_path = cp.rstrip("/") + project_path[len(hp) :].replace("\\", "/")
+        project_path = cp.rstrip("/") + project_path[len(hp):].replace("\\", "/")
         logger.info("engine: path mapped to container path %s", project_path)
 
     # ── Mark run as RUNNING ───────────────────────────────────────────────────
@@ -251,7 +275,12 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
 
     # ── Detect runner ─────────────────────────────────────────────────────────
     try:
-        layer, cmd = _detect_runner(project_path)
+        layer, cmd = _detect_runner(
+            project_path,
+            parallel_workers=config.parallel_workers if config else 1,
+            retry_count=config.retry_count if config else 0,
+            test_timeout=config.test_timeout if config else 30000,
+        )
     except RuntimeError as exc:
         test_run.status = TestRunStatus.FAILED
         test_run.error_message = str(exc)

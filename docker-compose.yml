@@ -53,9 +53,6 @@ services:
       ENVIRONMENT: development
       DEBUG: "true"
       LOG_LEVEL: INFO
-      # Map host path (used in app) → container path (where volume is mounted). Ex: /Users/you/Documents/Projetos → /workspace
-      PROJECT_PATH_HOST_PREFIX: ${PROJECT_PATH_HOST_PREFIX:-}
-      PROJECT_PATH_CONTAINER_PREFIX: ${PROJECT_PATH_CONTAINER_PREFIX:-/workspace}
     ports:
       - "8000:8000"
     networks:

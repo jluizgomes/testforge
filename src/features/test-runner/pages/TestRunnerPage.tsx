@@ -41,6 +41,7 @@ import { useAppStore } from '@/stores/app-store'
 import { useProjects } from '@/features/projects/hooks/useProjects'
 import { apiClient, type TestResultItem, type NetworkRequest } from '@/services/api-client'
 import { useWebSocket } from '@/hooks/useWebSocket'
+import { useToast } from '@/components/ui/use-toast'
 
 // Lazy-load Monaco to avoid crashing if not installed yet
 const MonacoEditor = lazy(() =>
@@ -101,6 +102,7 @@ test.describe('My Test Suite', () => {
 export function TestRunnerPage() {
   const { projects } = useProjects()
   const currentProject = useAppStore(s => s.currentProject)
+  const { toast } = useToast()
 
   const [activeProjectId, setActiveProjectId] = useState<string>('')
 
@@ -120,6 +122,7 @@ export function TestRunnerPage() {
   const [editorCode, setEditorCode] = useState(EDITOR_TEMPLATE)
   const [theme] = useState<'vs-dark' | 'light'>('vs-dark')
   const logsEndRef = useRef<HTMLDivElement>(null)
+  const [activeLayerFilter, setActiveLayerFilter] = useState<string | null>(null)
   const [screenshotModal, setScreenshotModal] = useState<{
     url: string; name: string; status?: string; layer?: string
   } | null>(null)
@@ -219,6 +222,7 @@ export function TestRunnerPage() {
     setProgress(0)
     setResults([])
     setSelectedResult(null)
+    setActiveLayerFilter(null)
     setLogs([])
 
     addLog('info', 'Starting test run…')
@@ -229,7 +233,9 @@ export function TestRunnerPage() {
       setActiveRunId(run.id)
       addLog('info', `Test run created: ${run.id}`)
     } catch (err: unknown) {
-      addLog('error', `Failed to start run: ${String(err)}`)
+      const msg = err instanceof Error ? err.message : String(err)
+      addLog('error', `Failed to start run: ${msg}`)
+      toast({ title: 'Failed to start test run', description: msg, variant: 'destructive' })
       setIsRunning(false)
     }
   }
@@ -238,10 +244,18 @@ export function TestRunnerPage() {
     if (!activeProjectId || !activeRunId) return
     try {
       await apiClient.stopTestRun(activeProjectId, activeRunId)
-    } catch {/* ignore */}
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      toast({ title: 'Failed to stop test run', description: msg, variant: 'destructive' })
+    }
     setIsRunning(false)
     addLog('warn', 'Test run stopped by user')
   }
+
+  // Filter results by active layer (if any)
+  const filteredResults = activeLayerFilter
+    ? results.filter((r) => r.test_layer === activeLayerFilter)
+    : results
 
   // Collect all screenshots and network requests from results
   const allScreenshots = results.filter((r) => r.screenshot_path)
@@ -267,7 +281,7 @@ export function TestRunnerPage() {
         <div className="flex items-center gap-2">
           {/* Project selector */}
           {projects.length > 0 && (
-            <Select value={activeProjectId} onValueChange={setActiveProjectId}>
+            <Select value={activeProjectId} onValueChange={setActiveProjectId} disabled={isRunning}>
               <SelectTrigger className="w-48">
                 <SelectValue placeholder="Select project" />
               </SelectTrigger>
@@ -328,8 +342,11 @@ export function TestRunnerPage() {
             key={layer.id}
             className={cn(
               'cursor-pointer transition-all hover:shadow-md',
-              selectedResult?.test_layer === layer.id && 'ring-2 ring-primary'
+              activeLayerFilter === layer.id && 'ring-2 ring-primary'
             )}
+            onClick={() =>
+              setActiveLayerFilter((prev) => (prev === layer.id ? null : layer.id))
+            }
           >
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <CardTitle className="text-sm font-medium">{layer.name}</CardTitle>
@@ -379,9 +396,9 @@ export function TestRunnerPage() {
           <TabsTrigger value="results">
             <CheckCircle2 className="mr-2 h-4 w-4" />
             Results
-            {results.length > 0 && (
+            {filteredResults.length > 0 && (
               <Badge variant="secondary" className="ml-1.5 h-4 px-1 text-xs">
-                {results.length}
+                {filteredResults.length}
               </Badge>
             )}
           </TabsTrigger>
@@ -449,14 +466,29 @@ export function TestRunnerPage() {
             {/* Result list */}
             <Card className="lg:col-span-2">
               <CardHeader>
-                <CardTitle className="text-lg">Test Results</CardTitle>
+                <CardTitle className="text-lg">
+                  Test Results
+                  {activeLayerFilter && (
+                    <Badge variant="outline" className="ml-2 text-xs font-normal">
+                      {activeLayerFilter}
+                      <button
+                        className="ml-1 hover:text-destructive"
+                        onClick={(e) => { e.stopPropagation(); setActiveLayerFilter(null) }}
+                      >
+                        ×
+                      </button>
+                    </Badge>
+                  )}
+                </CardTitle>
               </CardHeader>
               <CardContent className="p-0">
                 <ScrollArea className="h-[480px]">
-                  {results.length === 0 ? (
-                    <p className="p-6 text-sm text-muted-foreground">No results yet.</p>
+                  {filteredResults.length === 0 ? (
+                    <p className="p-6 text-sm text-muted-foreground">
+                      {activeLayerFilter ? `No ${activeLayerFilter} results.` : 'No results yet.'}
+                    </p>
                   ) : (
-                    results.map((r) => (
+                    filteredResults.map((r) => (
                       <button
                         key={r.id}
                         className={cn(
