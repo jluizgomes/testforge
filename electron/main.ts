@@ -1,11 +1,7 @@
 import { app, BrowserWindow, ipcMain, shell, dialog, Notification } from 'electron'
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
 import { BackendManager } from './backend-manager.js'
-
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
 
 let mainWindow: BrowserWindow | null = null
 let backendManager: BackendManager | null = null

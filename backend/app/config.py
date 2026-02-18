@@ -1,9 +1,10 @@
 """Application configuration using Pydantic Settings."""
 
+import json
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import PostgresDsn, field_validator
+from pydantic import PostgresDsn, field_validator, ValidationInfo
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -56,6 +57,28 @@ class Settings(BaseSettings):
         "http://jluizgomes.local:3000",
     ]
 
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v: str | list[str]) -> list[str]:
+        """Parse CORS_ORIGINS from JSON string (e.g. from Docker env)."""
+        if isinstance(v, str):
+            try:
+                v = json.loads(v)
+            except json.JSONDecodeError:
+                v = [o.strip() for o in v.split(",") if o.strip()]
+        return list(v) if isinstance(v, list) else [v]
+
+    @field_validator("cors_origins", mode="after")
+    @classmethod
+    def ensure_dev_origins(cls, v: list[str], info: ValidationInfo) -> list[str]:
+        """In development, always allow localhost origins (e.g. Vite on 5173)."""
+        if info.data.get("environment") != "development":
+            return v
+        for origin in ("http://localhost:5173", "http://127.0.0.1:5173"):
+            if origin not in v:
+                v = [*v, origin]
+        return v
+
     # AI Providers
     openai_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
@@ -75,6 +98,10 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = "INFO"
+
+    # Docker: map host project path to container path (e.g. host /Users/you/projects → /workspace)
+    project_path_host_prefix: str = ""
+    project_path_container_prefix: str = ""
 
 
 @lru_cache

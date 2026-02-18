@@ -76,6 +76,7 @@ class GeneratedTest(Base, UUIDMixin, TimestampMixin):
     test_code: Mapped[str] = mapped_column(Text, nullable=False)
     test_type: Mapped[str] = mapped_column(String(50), default="e2e")
     entry_point: Mapped[str | None] = mapped_column(String(1000))
+    content_hash: Mapped[str | None] = mapped_column(String(32))
     accepted: Mapped[bool] = mapped_column(Boolean, default=False)
 
     scan_job: Mapped["ScanJob"] = relationship("ScanJob", back_populates="generated_tests")

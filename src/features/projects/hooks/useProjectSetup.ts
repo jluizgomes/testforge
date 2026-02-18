@@ -73,8 +73,8 @@ export function useProjectSetup() {
 
       // For frontend/backend, try a simple fetch
       if (type !== 'database') {
-        const response = await fetch(url, {
-          method: 'HEAD',
+        await fetch(url, {
+          method: 'GET',
           mode: 'no-cors',
         })
         // no-cors mode doesn't give us status, so we assume success if no error

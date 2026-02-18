@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState, useCallback } from 'react'
 import {
   Dialog,
   DialogContent,
@@ -11,6 +11,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Loader2, CheckCircle2, XCircle, FileSearch } from 'lucide-react'
 import { apiClient } from '@/services/api-client'
+import { useWebSocket } from '@/hooks/useWebSocket'
 
 interface ScanProgressModalProps {
   open: boolean
@@ -39,7 +40,8 @@ const STATUS_LABELS: Record<string, string> = {
 
 export function ScanProgressModal({
   open,
-  projectId,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  projectId: _projectId,
   jobId,
   onComplete,
   onClose,
@@ -51,41 +53,31 @@ export function ScanProgressModal({
     entryPointsFound: 0,
     testsGenerated: 0,
   })
-  const pollRef = useRef<number | null>(null)
 
-  useEffect(() => {
-    if (!open || !jobId) return
+  const handleProgress = useCallback((data: Record<string, unknown>) => {
+    setState({
+      status: (data.status as ScanState['status']) ?? 'pending',
+      progress: (data.progress as number) ?? 0,
+      filesFound: (data.files_found as number) ?? 0,
+      entryPointsFound: (data.entry_points_found as number) ?? 0,
+      testsGenerated: (data.tests_generated as number) ?? 0,
+      errorMessage: data.error_message as string | undefined,
+    })
+  }, [])
 
-    const poll = async () => {
-      try {
-        const res = await apiClient.getScanStatus(jobId)
-        setState({
-          status: res.status as ScanState['status'],
-          progress: res.progress,
-          filesFound: res.files_found,
-          entryPointsFound: res.entry_points_found,
-          testsGenerated: res.tests_generated,
-          errorMessage: res.error_message,
-        })
+  const pollFn = useCallback(async () => {
+    if (!jobId) throw new Error('no jobId')
+    const res = await apiClient.getScanStatus(jobId)
+    return res as unknown as Record<string, unknown>
+  }, [jobId])
 
-        if (res.status === 'completed') {
-          if (pollRef.current) clearInterval(pollRef.current)
-          // Don't auto-close — let user see results and click "View Suggestions"
-        } else if (res.status === 'failed') {
-          if (pollRef.current) clearInterval(pollRef.current)
-        }
-      } catch {
-        // ignore transient errors
-      }
-    }
-
-    poll()
-    pollRef.current = window.setInterval(poll, 2000)
-
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current)
-    }
-  }, [open, jobId])
+  useWebSocket<Record<string, unknown>>({
+    jobType: 'scan',
+    jobId,
+    enabled: open && !!jobId && state.status !== 'completed' && state.status !== 'failed',
+    onMessage: handleProgress,
+    pollFn,
+  })
 
   const isDone = state.status === 'completed' || state.status === 'failed'
 

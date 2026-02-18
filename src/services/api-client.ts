@@ -211,15 +211,12 @@ export interface CreateScheduleInput {
 // ── API Client ────────────────────────────────────────────────────────────────
 
 class ApiClient {
+  private static readonly DEFAULT_BASE_URL = 'http://localhost:8000'
+
   private getBaseUrl(): string {
     const storeUrl = useAppStore.getState().backendUrl
     if (storeUrl) return storeUrl
-
-    if (typeof window !== 'undefined' && window.electronAPI) {
-      return 'http://jluizgomes.local:8000'
-    }
-
-    return import.meta.env.VITE_API_URL || 'http://jluizgomes.local:8000'
+    return import.meta.env.VITE_API_URL || ApiClient.DEFAULT_BASE_URL
   }
 
   private async request<T>(
@@ -299,7 +296,7 @@ class ApiClient {
   ): Promise<TestRun> {
     return this.request(`/api/v1/projects/${projectId}/runs`, {
       method: 'POST',
-      body: JSON.stringify(config || {}),
+      body: JSON.stringify({ config: config ?? null }),
     })
   }
 
@@ -424,6 +421,17 @@ class ApiClient {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
     })
+  }
+
+  async exportAcceptedTests(projectId: string): Promise<Blob> {
+    const response = await fetch(
+      `${this.getBaseUrl()}/api/v1/scan/export/${projectId}`,
+    )
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.detail || `HTTP error ${response.status}`)
+    }
+    return response.blob()
   }
 
   // ── Settings ────────────────────────────────────────────────────────────────

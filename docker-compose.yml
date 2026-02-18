@@ -1,5 +1,39 @@
 services:
 
+  # ── Infrastructure (local) ───────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: testforge-postgres
+    environment:
+      POSTGRES_USER: testforge
+      POSTGRES_PASSWORD: testforge
+      POSTGRES_DB: testforge
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testforge -d testforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: testforge-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - app_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   # ── Application ───────────────────────────────────────────────────────────────
 
   backend:
@@ -9,29 +43,36 @@ services:
     container_name: testforge-backend
     env_file:
       - path: ./backend/.env
-        required: false          # .env is optional; CI uses the environment block below
+        required: false
     environment:
       PYTHONPATH: /app
-      DATABASE_URL: postgresql+asyncpg://testforge:testforge@core-postgres:5432/testforge
-      REDIS_URL: redis://core-redis:6379
+      DATABASE_URL: postgresql+asyncpg://testforge:testforge@postgres:5432/testforge
+      REDIS_URL: redis://redis:6379
       SECRET_KEY: dev-secret-key-change-in-production
       CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000"]'
       ENVIRONMENT: development
       DEBUG: "true"
       LOG_LEVEL: INFO
+      # Map host path (used in app) → container path (where volume is mounted). Ex: /Users/you/Documents/Projetos → /workspace
+      PROJECT_PATH_HOST_PREFIX: ${PROJECT_PATH_HOST_PREFIX:-}
+      PROJECT_PATH_CONTAINER_PREFIX: ${PROJECT_PATH_CONTAINER_PREFIX:-/workspace}
     ports:
       - "8000:8000"
     networks:
-      - core_net
+      - app_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
-      # Map server home to Mac-style paths so stored project paths resolve inside the container
-      - /home/jluizgomes:/Users/jluizgomes:ro
-      - /home/jluizgomes/Documents:/Volumes/Documents:ro
+      - ./backend:/app
+      - ${PROJECTS_PATH:-.}:${CONTAINER_WORKSPACE:-/workspace}:ro
     command: ["./entrypoint.sh", "--reload"]
 
 networks:
-  core_net:
-    external: true
+  app_net:
+    driver: bridge
 
 volumes:
   postgres_data:

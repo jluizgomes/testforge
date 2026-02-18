@@ -77,6 +77,14 @@ async def create_test_run(
     await db.commit()
     await db.refresh(test_run)
 
+    # Reload with results loaded so response serialization does not lazy-load
+    result = await db.execute(
+        select(TestRun)
+        .where(TestRun.id == test_run.id)
+        .options(selectinload(TestRun.results))
+    )
+    test_run = result.scalar_one()
+
     # Launch test execution in the background (non-blocking)
     background_tasks.add_task(run_tests_for_project, project_id, str(test_run.id))
 
@@ -93,11 +101,7 @@ async def get_test_run(
     """Get a specific test run."""
     await get_project_or_404(project_id, db)
 
-    query = select(TestRun).where(
-        TestRun.id == run_id,
-        TestRun.project_id == project_id,
-    )
-
+    query = select(TestRun).where(TestRun.id == run_id, TestRun.project_id == project_id)
     if include_results:
         query = query.options(selectinload(TestRun.results))
 
@@ -191,7 +195,9 @@ async def stop_test_run(
     run_id: str,
     db: AsyncSession = Depends(get_db),
 ) -> TestRun:
-    """Stop a running test run."""
+    """Stop a running test run (kills the subprocess if alive)."""
+    from app.core.engine import cancel_run
+
     await get_project_or_404(project_id, db)
 
     result = await db.execute(
@@ -213,6 +219,9 @@ async def stop_test_run(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Test run is not running",
         )
+
+    # Kill the subprocess if it's still alive
+    cancel_run(run_id)
 
     test_run.status = TestRunStatus.CANCELLED
     test_run.completed_at = datetime.now(timezone.utc)

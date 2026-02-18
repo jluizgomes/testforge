@@ -16,6 +16,7 @@ import {
   Sparkles,
   Loader2,
   Trash2,
+  Download,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { apiClient, type GeneratedTestItem } from '@/services/api-client'
@@ -40,6 +41,7 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
   const [selected, setSelected] = useState<GeneratedTestItem | null>(null)
   const [accepting, setAccepting] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
 
   useEffect(() => {
     apiClient
@@ -81,6 +83,23 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
     }
   }
 
+  const handleExport = async () => {
+    setExporting(true)
+    try {
+      const blob = await apiClient.exportAcceptedTests(projectId)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `tests-${projectId.slice(0, 8)}.zip`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      console.error('Export failed:', err)
+    } finally {
+      setExporting(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-48 gap-2 text-muted-foreground">
@@ -108,13 +127,32 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
       {/* ── Left: list ── */}
       <Card className="lg:col-span-2 flex flex-col">
         <CardHeader className="pb-2">
-          <CardTitle className="text-base flex items-center gap-2">
-            <Sparkles className="h-4 w-4 text-primary" />
-            AI Suggestions
-          </CardTitle>
-          <CardDescription>
-            {accepted.length} accepted · {pending.length} pending
-          </CardDescription>
+          <div className="flex items-start justify-between">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-primary" />
+                AI Suggestions
+              </CardTitle>
+              <CardDescription>
+                {accepted.length} accepted · {pending.length} pending
+              </CardDescription>
+            </div>
+            {accepted.length > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={exporting}
+                onClick={handleExport}
+              >
+                {exporting ? (
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Download className="mr-1.5 h-3.5 w-3.5" />
+                )}
+                Export ZIP
+              </Button>
+            )}
+          </div>
         </CardHeader>
         <CardContent className="p-0 flex-1 overflow-hidden">
           <ScrollArea className="h-full">

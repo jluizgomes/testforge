@@ -242,9 +242,9 @@ db-history: ## Show migration history
 	@echo "$(BLUE)Migration history:$(NC)"
 	cd $(BACKEND_DIR) && $(CONDA_RUN) alembic history
 
-##@ Docker (Infrastructure - local PostgreSQL na porta 5434)
+##@ Docker (Postgres + Redis + Backend locais)
 
-docker-up: ## Start PostgreSQL + Backend (porta 5434, backend em 8100)
+docker-up: ## Sobe Postgres (5432), Redis (6379) e Backend (8000). Defina PROJECTS_PATH para o dir a escanear.
 	@echo "$(BLUE)Starting PostgreSQL and Backend...$(NC)"
 	cd $(ROOT_DIR) && docker compose up -d
 	@echo "$(GREEN)✓ Services started$(NC)"
@@ -259,7 +259,7 @@ backend-ready: docker-up ## Garante backend online (Docker) antes de rodar/build
 		sleep 2; \
 	done; \
 	echo "$(RED)Backend did not become ready in time.$(NC)"; \
-	echo "  Check: docker compose logs backend  (backend needs core-postgres and core-redis on core_net)"; \
+	echo "  Check: docker compose logs backend"; \
 	echo "  Or run: SKIP_BACKEND_READY=1 make dev-electron"; exit 1
 
 docker-down: ## Stop PostgreSQL local

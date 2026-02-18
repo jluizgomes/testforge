@@ -1,8 +1,11 @@
 """Project scanner — discovers entry points and generates AI test suggestions."""
 
 import asyncio
+import hashlib
+import io
 import logging
 import re
+import zipfile
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +14,7 @@ from typing import Any
 import httpx
 from dotenv import dotenv_values
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +22,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import async_session_factory, get_db
 from app.models.project import Project, ProjectConfig
 from app.models.scanner import GeneratedTest, ScanJob, ScanJobStatus
+try:
+    from app.ws import ws_manager
+except Exception:
+    ws_manager = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -348,10 +356,12 @@ def _find_entry_points_from_fs(project_path: str, max_files: int = 500) -> list[
             content = file_path.read_text(encoding="utf-8", errors="ignore")
             is_entry = any(p.search(content) for p in _ROUTE_PATTERNS)
             if is_entry or "export default" in content or "class " in content:
+                preview = content[:800]
                 entry_points.append({
                     "path": str(file_path.relative_to(root)),
-                    "content_preview": content[:800],
+                    "content_preview": preview,
                     "extension": file_path.suffix,
+                    "content_hash": hashlib.md5(preview.encode()).hexdigest(),
                 })
         except Exception:
             pass
@@ -366,8 +376,28 @@ def _find_entry_points_from_structure(structure: dict[str, Any]) -> list[dict[st
         if isinstance(ep, str):
             entry_points.append({"path": ep, "content_preview": "", "extension": Path(ep).suffix})
         elif isinstance(ep, dict):
+            # Compute hash if content_preview is present and hash is missing
+            if ep.get("content_preview") and not ep.get("content_hash"):
+                ep["content_hash"] = hashlib.md5(ep["content_preview"].encode()).hexdigest()
             entry_points.append(ep)
     return entry_points
+
+
+async def _broadcast_scan_progress(job: ScanJob) -> None:
+    """Push scan progress to connected WebSocket clients."""
+    if ws_manager is None:
+        return
+    try:
+        await ws_manager.broadcast("scan", str(job.id), {
+            "status": job.status.value if isinstance(job.status, ScanJobStatus) else job.status,
+            "progress": job.progress,
+            "files_found": job.files_found,
+            "entry_points_found": job.entry_points_found,
+            "tests_generated": job.tests_generated,
+            "error_message": job.error_message,
+        })
+    except Exception:
+        pass
 
 
 async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | None) -> None:
@@ -398,6 +428,7 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
             job.status = ScanJobStatus.SCANNING
             job.progress = 10
             await db.commit()
+            await _broadcast_scan_progress(job)
 
             if structure:
                 entry_points = _find_entry_points_from_structure(structure)
@@ -421,10 +452,38 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
             job.entry_points_found = len(entry_points)
             job.progress = 30
             await db.commit()
+            await _broadcast_scan_progress(job)
+
+            # ── Incremental: skip unchanged entry points ─────────────────────
+            existing_result = await db.execute(
+                select(GeneratedTest.entry_point, GeneratedTest.content_hash)
+                .where(
+                    GeneratedTest.project_id == job.project_id,
+                    GeneratedTest.content_hash.isnot(None),
+                )
+            )
+            existing_hashes = {
+                row.entry_point: row.content_hash
+                for row in existing_result.all()
+            }
+            if existing_hashes:
+                before = len(entry_points)
+                entry_points = [
+                    ep for ep in entry_points
+                    if ep.get("content_hash") != existing_hashes.get(ep.get("path"))
+                ]
+                skipped = before - len(entry_points)
+                if skipped:
+                    logger.info(
+                        "scan: incremental — skipped %d unchanged, %d new/modified",
+                        skipped,
+                        len(entry_points),
+                    )
 
             # ── Phase 2: Generate tests via AI ───────────────────────────────
             job.status = ScanJobStatus.GENERATING
             await db.commit()
+            await _broadcast_scan_progress(job)
 
             from app.ai.agents.test_generator import TestGeneratorAgent
             from app.ai.providers import get_ai_provider
@@ -508,7 +567,8 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
 
                 # Store ALL generated tests (not just the first)
                 for idx, code in enumerate(tests):
-                    ep_path = group_eps[idx].get("path", group_name) if idx < len(group_eps) else group_name
+                    ep_data = group_eps[idx] if idx < len(group_eps) else {}
+                    ep_path = ep_data.get("path", group_name) if ep_data else group_name
                     gt = GeneratedTest(
                         scan_job_id=job_id,
                         project_id=job.project_id,
@@ -516,6 +576,7 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                         test_code=code,
                         test_type=test_type,
                         entry_point=ep_path,
+                        content_hash=ep_data.get("content_hash"),
                         accepted=False,
                     )
                     db.add(gt)
@@ -524,11 +585,13 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                 job.progress = 30 + int((group_idx + 1) / min(total_groups, 10) * 60)
                 job.tests_generated = generated_count
                 await db.commit()
+                await _broadcast_scan_progress(job)
 
             job.status = ScanJobStatus.COMPLETED
             job.progress = 100
             job.tests_generated = generated_count
             await db.commit()
+            await _broadcast_scan_progress(job)
 
         except Exception as exc:
             logger.exception("Scan job %s failed: %s", job_id, exc)
@@ -539,6 +602,7 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                     err_job.status = ScanJobStatus.FAILED
                     err_job.error_message = str(exc)
                     await error_db.commit()
+                    await _broadcast_scan_progress(err_job)
 
 
 def _template_for(path: str, test_type: str, config: ProjectConfig | None = None) -> str:
@@ -588,6 +652,23 @@ async def start_scan(
     project = proj_result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    # Reject if a scan is already in progress for this project
+    active_result = await db.execute(
+        select(ScanJob.id).where(
+            ScanJob.project_id == request.project_id,
+            ScanJob.status.in_([
+                ScanJobStatus.PENDING,
+                ScanJobStatus.SCANNING,
+                ScanJobStatus.GENERATING,
+            ]),
+        ).limit(1)
+    )
+    if active_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A scan is already in progress for this project",
+        )
 
     # Create scan job
     job = ScanJob(
@@ -674,3 +755,57 @@ async def delete_generated_test(
 
     await db.delete(test)
     await db.commit()
+
+
+@router.get("/export/{project_id}")
+async def export_accepted_tests(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """Export all accepted test suggestions as a ZIP file."""
+    result = await db.execute(
+        select(GeneratedTest)
+        .where(GeneratedTest.project_id == project_id, GeneratedTest.accepted == True)
+        .order_by(GeneratedTest.created_at)
+    )
+    tests = list(result.scalars().all())
+
+    if not tests:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No accepted tests found for this project",
+        )
+
+    buf = io.BytesIO()
+    used_names: set[str] = set()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for t in tests:
+            # Determine folder and extension based on test_type
+            if t.test_type == "api":
+                folder = "api"
+                ext = ".test.py"
+            else:
+                folder = "e2e"
+                ext = ".spec.ts"
+
+            stem = Path(t.test_name.removeprefix("Test: ")).stem or "test"
+            # Sanitize filename
+            stem = re.sub(r"[^\w\-]", "_", stem).strip("_") or "test"
+            name = f"{folder}/{stem}{ext}"
+
+            # Dedup with numeric suffix
+            if name in used_names:
+                counter = 2
+                while f"{folder}/{stem}_{counter}{ext}" in used_names:
+                    counter += 1
+                name = f"{folder}/{stem}_{counter}{ext}"
+            used_names.add(name)
+
+            zf.writestr(name, t.test_code)
+
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=tests-{project_id[:8]}.zip"},
+    )

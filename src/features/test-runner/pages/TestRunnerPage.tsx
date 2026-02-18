@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, Suspense, lazy } from 'react'
+import { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react'
 import {
   Card,
   CardContent,
@@ -40,6 +40,7 @@ import { ScreenshotModal } from '@/components/ScreenshotModal'
 import { useAppStore } from '@/stores/app-store'
 import { useProjects } from '@/features/projects/hooks/useProjects'
 import { apiClient, type TestResultItem, type NetworkRequest } from '@/services/api-client'
+import { useWebSocket } from '@/hooks/useWebSocket'
 
 // Lazy-load Monaco to avoid crashing if not installed yet
 const MonacoEditor = lazy(() =>
@@ -119,7 +120,6 @@ export function TestRunnerPage() {
   const [editorCode, setEditorCode] = useState(EDITOR_TEMPLATE)
   const [theme] = useState<'vs-dark' | 'light'>('vs-dark')
   const logsEndRef = useRef<HTMLDivElement>(null)
-  const pollRef = useRef<number | null>(null)
   const [screenshotModal, setScreenshotModal] = useState<{
     url: string; name: string; status?: string; layer?: string
   } | null>(null)
@@ -158,34 +158,60 @@ export function TestRunnerPage() {
     setLogs((prev) => [...prev, { time, level, message }])
   }
 
-  const pollResults = async (projectId: string, runId: string) => {
-    try {
-      const items = await apiClient.getTestRunResults(projectId, runId)
-      setResults(items)
-      const run = await apiClient.getTestRun(projectId, runId)
-      const pct =
-        run.status === 'passed' || run.status === 'failed' || run.status === 'cancelled'
-          ? 100
-          : run.total_tests > 0
-            ? Math.round(
-                ((run.passed_tests + run.failed_tests) / run.total_tests) * 100
-              )
-            : progress
+  const handleRunProgress = useCallback(
+    async (data: Record<string, unknown>) => {
+      const status = data.status as string | undefined
 
-      setProgress(pct)
+      // Fetch full results from HTTP for both WS and polling
+      if (activeProjectId && activeRunId) {
+        try {
+          const items = await apiClient.getTestRunResults(activeProjectId, activeRunId)
+          setResults(items)
+        } catch {
+          // ignore
+        }
+      }
 
-      if (run.status === 'passed' || run.status === 'failed' || run.status === 'cancelled') {
+      if (data.progress !== undefined) {
+        setProgress(data.progress as number)
+      }
+
+      if (status === 'passed' || status === 'failed' || status === 'cancelled') {
         setIsRunning(false)
-        if (pollRef.current) clearInterval(pollRef.current)
         addLog(
-          run.status === 'passed' ? 'success' : 'error',
-          `Run completed — status: ${run.status}`
+          status === 'passed' ? 'success' : 'error',
+          `Run completed — status: ${status}`
         )
       }
-    } catch {
-      // Ignore polling errors
-    }
-  }
+    },
+    [activeProjectId, activeRunId]
+  )
+
+  const pollRunFn = useCallback(async () => {
+    if (!activeProjectId || !activeRunId) throw new Error('no run')
+    const run = await apiClient.getTestRun(activeProjectId, activeRunId)
+    const pct =
+      run.status === 'passed' || run.status === 'failed' || run.status === 'cancelled'
+        ? 100
+        : run.total_tests > 0
+          ? Math.round(((run.passed_tests + run.failed_tests) / run.total_tests) * 100)
+          : 0
+    return {
+      status: run.status,
+      progress: pct,
+      total_tests: run.total_tests,
+      passed_tests: run.passed_tests,
+      failed_tests: run.failed_tests,
+    } as unknown as Record<string, unknown>
+  }, [activeProjectId, activeRunId])
+
+  useWebSocket<Record<string, unknown>>({
+    jobType: 'run',
+    jobId: activeRunId,
+    enabled: isRunning,
+    onMessage: handleRunProgress,
+    pollFn: pollRunFn,
+  })
 
   const handleStart = async () => {
     if (!activeProjectId) return
@@ -202,10 +228,6 @@ export function TestRunnerPage() {
       const run = await apiClient.startTestRun(activeProjectId)
       setActiveRunId(run.id)
       addLog('info', `Test run created: ${run.id}`)
-
-      pollRef.current = window.setInterval(() => {
-        pollResults(activeProjectId, run.id)
-      }, 2000)
     } catch (err: unknown) {
       addLog('error', `Failed to start run: ${String(err)}`)
       setIsRunning(false)
@@ -214,7 +236,6 @@ export function TestRunnerPage() {
 
   const handleStop = async () => {
     if (!activeProjectId || !activeRunId) return
-    if (pollRef.current) clearInterval(pollRef.current)
     try {
       await apiClient.stopTestRun(activeProjectId, activeRunId)
     } catch {/* ignore */}

@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import shutil
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,11 +19,41 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.db.session import async_session_factory
 from app.models.project import Project, ProjectConfig
 from app.models.test_run import TestResult, TestRun, TestResultStatus, TestRunStatus
 
+try:
+    from app.ws import ws_manager
+except Exception:
+    ws_manager = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
+
+# ── Process registry ──────────────────────────────────────────────────────────
+# Maps run_id → subprocess.Process for cancellation and concurrency control
+_running_processes: dict[str, asyncio.subprocess.Process] = {}
+MAX_CONCURRENT_RUNS = 5
+
+
+async def _broadcast_run(run_id: str, data: dict[str, Any]) -> None:
+    """Broadcast run progress via WebSocket (no-op if WS unavailable)."""
+    if ws_manager is not None:
+        try:
+            await ws_manager.broadcast("run", run_id, data)
+        except Exception:
+            pass
+
+
+def cancel_run(run_id: str) -> bool:
+    """Kill the subprocess for a given run_id. Returns True if process was found and killed."""
+    proc = _running_processes.get(run_id)
+    if proc and proc.returncode is None:
+        proc.kill()
+        logger.info("engine: killed subprocess for run %s", run_id)
+        return True
+    return False
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -183,6 +212,11 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
             env_vars = {str(k): str(v) for k, v in ev.items()}
 
     project_path = project.path
+    # When running in Docker, rewrite host path to container path if mapping is set
+    hp, cp = settings.project_path_host_prefix.strip(), settings.project_path_container_prefix.strip()
+    if hp and cp and project_path.startswith(hp):
+        project_path = cp.rstrip("/") + project_path[len(hp) :].replace("\\", "/")
+        logger.info("engine: path mapped to container path %s", project_path)
 
     # ── Mark run as RUNNING ───────────────────────────────────────────────────
     run_result = await db.execute(select(TestRun).where(TestRun.id == run_id))
@@ -194,6 +228,7 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
     test_run.status = TestRunStatus.RUNNING
     test_run.started_at = started
     await db.commit()
+    await _broadcast_run(run_id, {"status": "running", "progress": 0})
 
     # ── Detect runner ─────────────────────────────────────────────────────────
     try:
@@ -203,6 +238,7 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
         test_run.error_message = str(exc)
         test_run.completed_at = datetime.now(timezone.utc)
         await db.commit()
+        await _broadcast_run(run_id, {"status": "failed", "error_message": str(exc)})
         logger.warning("engine: %s", exc)
         return
 
@@ -216,10 +252,22 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
         len(env_vars),
     )
 
+    # ── Concurrency guard ─────────────────────────────────────────────────────
+    if len(_running_processes) >= MAX_CONCURRENT_RUNS:
+        test_run.status = TestRunStatus.FAILED
+        test_run.error_message = f"Too many concurrent runs ({MAX_CONCURRENT_RUNS} max)"
+        test_run.completed_at = datetime.now(timezone.utc)
+        await db.commit()
+        await _broadcast_run(run_id, {
+            "status": "failed", "error_message": test_run.error_message,
+        })
+        return
+
     # ── Execute ───────────────────────────────────────────────────────────────
     stdout_buf: list[bytes] = []
     stderr_buf: list[bytes] = []
     returncode = 1
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -228,6 +276,7 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        _running_processes[run_id] = proc
         stdout_raw, stderr_raw = await asyncio.wait_for(
             proc.communicate(), timeout=300  # 5-minute hard cap
         )
@@ -241,14 +290,22 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
         test_run.error_message = "Test run timed out after 5 minutes"
         test_run.completed_at = datetime.now(timezone.utc)
         await db.commit()
+        await _broadcast_run(run_id, {
+            "status": "failed", "error_message": test_run.error_message,
+        })
         return
     except Exception as exc:
         test_run.status = TestRunStatus.FAILED
         test_run.error_message = f"Failed to start test process: {exc}"
         test_run.completed_at = datetime.now(timezone.utc)
         await db.commit()
+        await _broadcast_run(run_id, {
+            "status": "failed", "error_message": test_run.error_message,
+        })
         logger.exception("engine: subprocess error")
         return
+    finally:
+        _running_processes.pop(run_id, None)
 
     stdout_text = b"".join(stdout_buf).decode("utf-8", errors="replace")
     stderr_text = b"".join(stderr_buf).decode("utf-8", errors="replace")
@@ -296,6 +353,13 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
             )
         )
 
+    # ── Re-check run status (may have been cancelled while subprocess ran) ───
+    await db.refresh(test_run)
+    if test_run.status == TestRunStatus.CANCELLED:
+        logger.info("engine: run %s was cancelled while executing", run_id)
+        await _broadcast_run(run_id, {"status": "cancelled", "progress": 100})
+        return
+
     # ── Update run summary ────────────────────────────────────────────────────
     completed = datetime.now(timezone.utc)
     passed = sum(1 for r in parsed if r["status"] == TestResultStatus.PASSED)
@@ -312,6 +376,14 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
     test_run.status = TestRunStatus.PASSED if failed == 0 else TestRunStatus.FAILED
 
     await db.commit()
+    await _broadcast_run(run_id, {
+        "status": test_run.status.value if hasattr(test_run.status, "value") else test_run.status,
+        "progress": 100,
+        "total_tests": total,
+        "passed_tests": passed,
+        "failed_tests": failed,
+        "skipped_tests": skipped,
+    })
     logger.info(
         "engine: run %s done — %d/%d passed in %dms",
         run_id,

@@ -9,7 +9,7 @@
     "build": "tsc && vite build && electron-builder",
     "build:frontend": "tsc && vite build",
     "preview": "vite preview",
-    "electron:dev": "tsc -p electron/tsconfig.json && concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "electron:dev": "tsc -p electron/tsconfig.json && node -e \"require('fs').copyFileSync('electron/package.json','dist-electron/package.json')\" && concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "electron:build": "npm run build:frontend && electron-builder",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"electron/**/*.ts\"",

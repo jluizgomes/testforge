@@ -93,9 +93,9 @@ export const useAppStore = create<AppState>()(
             })
           }
         } else {
-          // Development mode without Electron (backend e.g. in Docker at jluizgomes.local:8000)
+          // Development without Electron: backend in Docker or local (localhost:8000)
           set({
-            backendUrl: 'http://jluizgomes.local:8000',
+            backendUrl: 'http://localhost:8000',
             backendStatus: { status: 'running', port: 8000 },
           })
         }

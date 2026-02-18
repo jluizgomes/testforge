@@ -83,6 +83,9 @@ export function ProjectDetail() {
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [scanning, setScanning] = useState(false)
 
+  // Config save error (must be declared before early returns)
+  const [configError, setConfigError] = useState<string | null>(null)
+
   // Auto-show suggestions if previous scan results exist
   useEffect(() => {
     if (!projectId || showSuggestions) return
@@ -225,9 +228,6 @@ export function ProjectDetail() {
   }
 
   // ── Config URL save ───────────────────────────────────────────────────
-  // Config save error
-  const [configError, setConfigError] = useState<string | null>(null)
-
   const saveConfig = async () => {
     setSavingConfig(true)
     setConfigError(null)
