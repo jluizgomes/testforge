@@ -6,6 +6,7 @@ WORKDIR /app
 # - gcc + libpq-dev: compile asyncpg/psycopg2 C extensions
 # - libpango*, libcairo2, libgdk-pixbuf*, libffi-dev, shared-mime-info: WeasyPrint PDF export
 # - curl: used by health probes
+# - Playwright system deps are installed via `playwright install-deps` below
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
@@ -24,8 +25,15 @@ COPY pyproject.toml README.md ./
 RUN mkdir -p app && touch app/__init__.py
 RUN pip install --no-cache-dir -e ".[dev]"
 
+# Install Playwright browsers (Chromium only) + OS-level dependencies
+RUN playwright install-deps chromium \
+    && playwright install chromium
+
 # Copy application source (invalidates cache on code changes only)
 COPY . .
+
+# Screenshots directory
+RUN mkdir -p /app/screenshots
 
 EXPOSE 8000
 
