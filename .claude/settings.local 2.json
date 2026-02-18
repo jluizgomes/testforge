@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(unzip:*)",
+      "Bash(uv:*)",
+      "Bash(source:*)",
+      "Bash(playwright install:*)",
+      "Bash(make:*)",
+      "Bash(git init:*)",
+      "Bash(wc:*)",
+      "Bash(__NEW_LINE_9f802757c53e236d__ echo \"=== Backend test count ===\")",
+      "Bash(__NEW_LINE_9f802757c53e236d__ echo \"\")",
+      "Bash(git add:*)",
+      "Bash(git check-ignore:*)",
+      "Bash(git commit:*)",
+      "Bash(node --version:*)"
+    ]
+  }
+}
