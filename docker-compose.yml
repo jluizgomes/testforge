@@ -1,35 +1,5 @@
 services:
 
-  # ── Infrastructure ────────────────────────────────────────────────────────────
-
-  core-postgres:
-    image: postgres:16-alpine
-    container_name: core-postgres
-    environment:
-      POSTGRES_USER: testforge
-      POSTGRES_PASSWORD: testforge
-      POSTGRES_DB: testforge
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U testforge -d testforge"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  core-redis:
-    image: redis:7-alpine
-    container_name: core-redis
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
   # ── Application ───────────────────────────────────────────────────────────────
 
   backend:
@@ -51,15 +21,13 @@ services:
       LOG_LEVEL: INFO
     ports:
       - "8000:8000"
-    depends_on:
-      core-postgres:
-        condition: service_healthy
-      core-redis:
-        condition: service_healthy
-    # Optional: uncomment for local hot-reload (bind mount can be empty on some Docker Desktop setups)
-    # volumes:
-    #   - ./backend:/app
+    networks:
+      - core_net
     command: ["./entrypoint.sh", "--reload"]
+
+networks:
+  core_net:
+    external: true
 
 volumes:
   postgres_data:
