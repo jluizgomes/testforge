@@ -14,6 +14,11 @@ interface UseWebSocketOptions<T> {
   pollFn: () => Promise<T>
   /** Polling interval in ms (default 2000) */
   pollIntervalMs?: number
+  /**
+   * Optional predicate: given a message, returns true if the job is
+   * in a terminal state and polling should stop automatically.
+   */
+  isTerminal?: (data: T) => boolean
 }
 
 interface UseWebSocketResult {
@@ -28,6 +33,7 @@ export function useWebSocket<T>({
   onMessage,
   pollFn,
   pollIntervalMs = 2000,
+  isTerminal,
 }: UseWebSocketOptions<T>): UseWebSocketResult {
   const [connected, setConnected] = useState(false)
   const [fallbackPolling, setFallbackPolling] = useState(false)
@@ -35,6 +41,7 @@ export function useWebSocket<T>({
   const pollRef = useRef<number | null>(null)
   const onMessageRef = useRef(onMessage)
   const pollFnRef = useRef(pollFn)
+  const isTerminalRef = useRef(isTerminal)
 
   // Keep refs up to date without triggering reconnect
   useEffect(() => {
@@ -43,19 +50,26 @@ export function useWebSocket<T>({
   useEffect(() => {
     pollFnRef.current = pollFn
   }, [pollFn])
+  useEffect(() => {
+    isTerminalRef.current = isTerminal
+  }, [isTerminal])
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+    setFallbackPolling(false)
+  }, [])
 
   const cleanup = useCallback(() => {
     if (wsRef.current) {
       wsRef.current.close()
       wsRef.current = null
     }
-    if (pollRef.current) {
-      clearInterval(pollRef.current)
-      pollRef.current = null
-    }
+    stopPolling()
     setConnected(false)
-    setFallbackPolling(false)
-  }, [])
+  }, [stopPolling])
 
   const startPolling = useCallback(() => {
     if (pollRef.current) return
@@ -65,6 +79,10 @@ export function useWebSocket<T>({
       try {
         const data = await pollFnRef.current()
         onMessageRef.current(data)
+        // Stop polling automatically on terminal state
+        if (isTerminalRef.current?.(data)) {
+          stopPolling()
+        }
       } catch {
         // Ignore transient polling errors
       }
@@ -73,7 +91,7 @@ export function useWebSocket<T>({
     // Immediate first poll
     poll()
     pollRef.current = window.setInterval(poll, pollIntervalMs)
-  }, [pollIntervalMs])
+  }, [pollIntervalMs, stopPolling])
 
   useEffect(() => {
     if (!enabled || !jobId) {

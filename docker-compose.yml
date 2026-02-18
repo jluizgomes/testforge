@@ -64,6 +64,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      - workspace_data:/app/workspace
       - ${PROJECTS_PATH:-.}:${CONTAINER_WORKSPACE:-/workspace}:ro
     command: ["./entrypoint.sh", "--reload"]
 
@@ -73,3 +74,4 @@ networks:
 
 volumes:
   postgres_data:
+  workspace_data:

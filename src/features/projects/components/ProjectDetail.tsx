@@ -41,6 +41,8 @@ import {
   Wifi,
   WifiOff,
   AlertCircle,
+  RefreshCw,
+  HardDrive,
 } from 'lucide-react'
 import {
   ResponsiveContainer,
@@ -54,6 +56,7 @@ import { useAppStore } from '@/stores/app-store'
 import { ScanProgressModal } from './ScanProgressModal'
 import { TestSuggestionsView } from './TestSuggestionsView'
 import { formatDate, formatDuration } from '@/lib/utils'
+import { useProjectSync } from '@/hooks/useProjectSync'
 
 interface EnvVar {
   key: string
@@ -116,6 +119,10 @@ export function ProjectDetail() {
   const [scanModalOpen, setScanModalOpen] = useState(false)
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [scanning, setScanning] = useState(false)
+
+  // Workspace sync
+  const { status: wsStatus, isSyncing, isWatching, progress: syncProgress, sync: syncWorkspace, unsync: unsyncWorkspace } =
+    useProjectSync(projectId ?? null, project?.path ?? null)
 
   // Runs tab: delete
   const deleteRunMutation = useMutation({
@@ -614,6 +621,150 @@ export function ProjectDetail() {
                 </Card>
               ))}
             </div>
+
+            {/* Workspace Sync card — only shown in Electron */}
+            {window.electronAPI && (
+              <Card>
+                <CardHeader className="flex flex-row items-center justify-between pb-2">
+                  <div className="flex items-center gap-2">
+                    <HardDrive className="h-4 w-4 text-muted-foreground" />
+                    <CardTitle className="text-sm font-medium">Workspace Sync</CardTitle>
+                    {isWatching && (
+                      <span className="flex items-center gap-1 text-xs text-green-600 font-medium">
+                        <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+                        Live
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2 text-xs"
+                      onClick={syncWorkspace}
+                      disabled={isSyncing}
+                    >
+                      {isSyncing ? (
+                        <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                      )}
+                      {isSyncing ? 'Syncing…' : 'Sync Now'}
+                    </Button>
+                    {wsStatus?.synced && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 px-2 text-xs text-destructive hover:text-destructive"
+                        onClick={unsyncWorkspace}
+                        disabled={isSyncing}
+                      >
+                        <Trash2 className="mr-1 h-3.5 w-3.5" />
+                        Clear
+                      </Button>
+                    )}
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {/* ── Progress steps (shown while syncing) ── */}
+                  {isSyncing && (
+                    <div className="space-y-2">
+                      {(['scanning', 'compressing', 'uploading'] as const).map((step) => {
+                        const isActive = syncProgress.step === step
+                        const isDone = (
+                          (step === 'scanning' && ['compressing', 'uploading', 'done'].includes(syncProgress.step)) ||
+                          (step === 'compressing' && ['uploading', 'done'].includes(syncProgress.step)) ||
+                          (step === 'uploading' && syncProgress.step === 'done')
+                        )
+                        const labels = {
+                          scanning: `Scanning files${isActive ? ` · ${syncProgress.current} found` : ''}`,
+                          compressing: 'Compressing ZIP',
+                          uploading: 'Uploading to container',
+                        }
+                        return (
+                          <div key={step} className="flex items-center gap-2 text-xs">
+                            {isDone ? (
+                              <CheckCircle2 className="h-3.5 w-3.5 text-green-500 shrink-0" />
+                            ) : isActive ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-500 shrink-0" />
+                            ) : (
+                              <span className="h-3.5 w-3.5 rounded-full border border-muted-foreground/30 shrink-0" />
+                            )}
+                            <span className={isActive ? 'text-foreground font-medium' : isDone ? 'text-muted-foreground' : 'text-muted-foreground/50'}>
+                              {labels[step]}
+                            </span>
+                          </div>
+                        )
+                      })}
+
+                      {/* Live scrolling file name */}
+                      {syncProgress.step === 'scanning' && syncProgress.lastFile && (
+                        <p className="ml-5 font-mono text-[10px] text-muted-foreground truncate">
+                          {syncProgress.lastFile}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* ── Status summary (idle / done / error) ── */}
+                  {!isSyncing && (
+                    <>
+                      {syncProgress.step === 'error' ? (
+                        <div className="flex items-center gap-2 text-sm text-destructive">
+                          <AlertCircle className="h-4 w-4 shrink-0" />
+                          <span>{syncProgress.error ?? 'Sync failed'}</span>
+                        </div>
+                      ) : wsStatus?.synced ? (
+                        <div className="flex items-center gap-3 text-sm flex-wrap">
+                          <span className="flex items-center gap-1 text-green-600 font-medium">
+                            <CheckCircle2 className="h-4 w-4" />
+                            Synced
+                          </span>
+                          <span className="text-muted-foreground">·</span>
+                          <span className="text-muted-foreground">{wsStatus.file_count} files</span>
+                          <span className="text-muted-foreground">·</span>
+                          <span className="text-muted-foreground">
+                            {(wsStatus.total_size_bytes / 1024).toFixed(0)} KB
+                          </span>
+                          {wsStatus.last_synced_at && (
+                            <>
+                              <span className="text-muted-foreground">·</span>
+                              <span className="text-muted-foreground">{formatDate(wsStatus.last_synced_at)}</span>
+                            </>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2 text-sm text-yellow-600">
+                          <AlertCircle className="h-4 w-4" />
+                          <span>Not synced — click "Sync Now" to upload project files to the container</span>
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {/* ── File list (shown after sync completes) ── */}
+                  {syncProgress.step === 'done' && syncProgress.files.length > 0 && (
+                    <div className="rounded-md border bg-muted/40 overflow-hidden">
+                      <div className="px-3 py-1.5 border-b bg-muted/60 flex items-center justify-between">
+                        <span className="text-xs font-medium text-muted-foreground">
+                          Synced files ({syncProgress.files.length})
+                        </span>
+                      </div>
+                      <div className="max-h-48 overflow-y-auto">
+                        {syncProgress.files.map((f) => (
+                          <div
+                            key={f}
+                            className="px-3 py-0.5 font-mono text-[11px] text-muted-foreground hover:bg-muted/60 truncate"
+                          >
+                            {f}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
 
             {/* Recent runs table */}
             {testRuns.length > 0 && (

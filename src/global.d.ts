@@ -13,6 +13,11 @@ interface ElectronFileApi {
   selectFile(options?: { filters?: { name: string; extensions: string[] }[]; title?: string }): Promise<string | null>
   readEnvFile(projectPath: string): Promise<Record<string, string>>
   scanProject(projectPath: string): Promise<Record<string, unknown>>
+  syncProject(projectPath: string, projectId: string, backendUrl: string): Promise<{ success: boolean; file_count?: number; files?: string[]; error?: string }>
+  watchProject(projectPath: string, projectId: string, backendUrl: string): Promise<{ success: boolean }>
+  unwatchProject(projectId: string): Promise<void>
+  onSyncProgress(cb: (data: { step: string; current: number; file?: string }) => void): void
+  offSyncProgress(): void
 }
 
 interface ElectronShellApi {

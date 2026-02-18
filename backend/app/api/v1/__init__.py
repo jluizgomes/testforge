@@ -10,11 +10,13 @@ from app.api.v1.scanner import router as scanner_router
 from app.api.v1.settings import router as settings_router
 from app.api.v1.test_runs import router as test_runs_router
 from app.api.v1.traces import router as traces_router
+from app.api.v1.workspace import router as workspace_router
 
 router = APIRouter()
 
 router.include_router(projects_router, prefix="/projects", tags=["Projects"])
 router.include_router(test_runs_router, prefix="/projects/{project_id}/runs", tags=["Test Runs"])
+router.include_router(workspace_router, prefix="/projects", tags=["Workspace"])
 router.include_router(traces_router, prefix="/traces", tags=["Traces"])
 router.include_router(ai_router, prefix="/ai", tags=["AI"])
 router.include_router(reports_router, prefix="/reports", tags=["Reports"])

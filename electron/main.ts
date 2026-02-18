@@ -3,6 +3,17 @@ import fs from 'fs'
 import path from 'path'
 import { BackendManager } from './backend-manager.js'
 
+// Lazy-loaded for workspace sync (only needed when sync is triggered)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let JSZip: any = null
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let chokidar: any = null
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let ignore: any = null
+
+// Map of active file watchers keyed by project ID
+const _watchers = new Map<string, { close(): void }>()
+
 let mainWindow: BrowserWindow | null = null
 let backendManager: BackendManager | null = null
 
@@ -244,6 +255,245 @@ function setupIpcHandlers() {
       return { success: true }
     }
     return { success: false, error: 'Notifications not supported' }
+  })
+
+  // ── Workspace Sync ────────────────────────────────────────────────────────
+
+  /**
+   * fs:sync-project — Walk project directory, create a ZIP (respecting
+   * .gitignore + default ignores), and POST it to the backend workspace
+   * endpoint. Starts a file watcher after a successful upload.
+   */
+  ipcMain.handle(
+    'fs:sync-project',
+    async (event, { projectPath, projectId, backendUrl }: {
+      projectPath: string
+      projectId: string
+      backendUrl: string
+    }): Promise<{ success: boolean; file_count?: number; files?: string[]; error?: string }> => {
+      const send = (data: { step: string; current: number; file?: string }) => {
+        try { event.sender.send('sync:progress', data) } catch { /* window may be gone */ }
+      }
+
+      try {
+        // Lazy-load heavy deps
+        if (!JSZip) JSZip = (await import('jszip')).default
+        if (!ignore) ignore = (await import('ignore')).default
+
+        const DEFAULT_IGNORES = [
+          'node_modules', '.git', '.github', '.venv', 'venv', 'dist', 'build',
+          '.next', '__pycache__', '*.pyc', '.DS_Store', 'coverage', '*.lock',
+          '*.log', '*.min.js', '*.map',
+        ]
+
+        // Build ignore filter
+        const ig = ignore()
+        ig.add(DEFAULT_IGNORES)
+
+        // Read .gitignore files (root)
+        for (const name of ['.gitignore', '.npmignore']) {
+          const p = path.join(projectPath, name)
+          if (fs.existsSync(p)) {
+            try { ig.add(fs.readFileSync(p, 'utf-8')) } catch { /* ignore */ }
+          }
+        }
+
+        const SKIP_DIRS = new Set([
+          'node_modules', '.git', '__pycache__', '.venv', 'venv',
+          'dist', 'build', '.next', 'coverage',
+        ])
+        const MAX_FILE_SIZE = 512 * 1024 // 500 KB — skip likely binaries
+        const MAX_DEPTH = 8
+
+        const zip = new JSZip()
+        const syncedFiles: string[] = []
+
+        send({ step: 'scanning', current: 0 })
+
+        const addDir = (dir: string, depth: number) => {
+          if (depth > MAX_DEPTH) return
+          let entries: string[]
+          try { entries = fs.readdirSync(dir) } catch { return }
+
+          for (const entry of entries) {
+            if (SKIP_DIRS.has(entry)) continue
+            const full = path.join(dir, entry)
+            const rel = path.relative(projectPath, full).replace(/\\/g, '/')
+            if (ig.ignores(rel)) continue
+
+            let stat: fs.Stats
+            try { stat = fs.statSync(full) } catch { continue }
+
+            if (stat.isDirectory()) {
+              addDir(full, depth + 1)
+            } else if (stat.isFile() && stat.size <= MAX_FILE_SIZE) {
+              try {
+                const data = fs.readFileSync(full)
+                zip.file(rel, data)
+                syncedFiles.push(rel)
+                // Emit every file so the UI can show the scrolling list
+                send({ step: 'scanning', current: syncedFiles.length, file: rel })
+              } catch { /* skip unreadable files */ }
+            }
+          }
+        }
+
+        addDir(projectPath, 0)
+
+        send({ step: 'compressing', current: syncedFiles.length })
+
+        // Generate ZIP as Buffer
+        const zipBuffer: Buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
+
+        send({ step: 'uploading', current: syncedFiles.length })
+
+        // Upload to backend using built-in fetch + FormData (Electron 22+ / Node 18+)
+        const url = `${backendUrl}/api/v1/projects/${projectId}/workspace/upload`
+        const blob = new Blob([zipBuffer], { type: 'application/zip' })
+        const form = new FormData()
+        form.append('file', blob, 'workspace.zip')
+
+        const resp = await fetch(url, { method: 'POST', body: form })
+
+        if (!resp.ok) {
+          const text = await resp.text()
+          return { success: false, error: `Upload failed (${resp.status}): ${text}` }
+        }
+
+        // Start watcher after successful upload
+        _startWatcher(projectPath, projectId, backendUrl, ig)
+
+        return { success: true, file_count: syncedFiles.length, files: syncedFiles }
+      } catch (err) {
+        return { success: false, error: String(err) }
+      }
+    }
+  )
+
+  /**
+   * fs:watch-project — Start a chokidar watcher for incremental sync.
+   * Each added/changed file is PUT to workspace/files; unlinked files are DELETE'd.
+   */
+  ipcMain.handle(
+    'fs:watch-project',
+    async (_event, { projectPath, projectId, backendUrl }: {
+      projectPath: string
+      projectId: string
+      backendUrl: string
+    }): Promise<{ success: boolean }> => {
+      try {
+        if (!ignore) ignore = (await import('ignore')).default
+        const ig = ignore()
+        ig.add(['node_modules', '.git', '__pycache__', '.venv', 'venv', 'dist', 'build', '.next'])
+        for (const name of ['.gitignore']) {
+          const p = path.join(projectPath, name)
+          if (fs.existsSync(p)) {
+            try { ig.add(fs.readFileSync(p, 'utf-8')) } catch { /* ignore */ }
+          }
+        }
+        _startWatcher(projectPath, projectId, backendUrl, ig)
+        return { success: true }
+      } catch (err) {
+        console.error('fs:watch-project error', err)
+        return { success: false }
+      }
+    }
+  )
+
+  /**
+   * fs:unwatch-project — Stop the chokidar watcher for a project.
+   */
+  ipcMain.handle(
+    'fs:unwatch-project',
+    (_event, { projectId }: { projectId: string }): void => {
+      const watcher = _watchers.get(projectId)
+      if (watcher) {
+        watcher.close()
+        _watchers.delete(projectId)
+      }
+    }
+  )
+}
+
+// ── Watcher helper (outside setupIpcHandlers to allow reuse) ─────────────────
+
+function _startWatcher(
+  projectPath: string,
+  projectId: string,
+  backendUrl: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ig: any,
+): void {
+  // Close any existing watcher for this project
+  const existing = _watchers.get(projectId)
+  if (existing) existing.close()
+
+  // Debounce timers: path → NodeJS.Timeout
+  const debounceMap = new Map<string, ReturnType<typeof setTimeout>>()
+
+  const scheduleSync = (rel: string, action: 'upsert' | 'delete', full: string) => {
+    const prev = debounceMap.get(rel)
+    if (prev) clearTimeout(prev)
+    const timer = setTimeout(async () => {
+      debounceMap.delete(rel)
+      if (action === 'upsert') {
+        try {
+          const data = fs.readFileSync(full)
+          const content_b64 = data.toString('base64')
+          await fetch(
+            `${backendUrl}/api/v1/projects/${projectId}/workspace/files`,
+            {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ path: rel, content_b64 }),
+            }
+          )
+        } catch { /* best-effort */ }
+      } else {
+        try {
+          await fetch(
+            `${backendUrl}/api/v1/projects/${projectId}/workspace/files`,
+            {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ path: rel }),
+            }
+          )
+        } catch { /* best-effort */ }
+      }
+    }, 150)
+    debounceMap.set(rel, timer)
+  }
+
+  // Lazy-load chokidar and start watching
+  import('chokidar').then((mod) => {
+    chokidar = mod.default ?? mod
+    const watcher = chokidar.watch(projectPath, {
+      ignored: (filePath: string) => {
+        const rel = path.relative(projectPath, filePath).replace(/\\/g, '/')
+        if (!rel) return false // root itself
+        return ig.ignores(rel)
+      },
+      persistent: true,
+      ignoreInitial: true,
+    })
+
+    watcher.on('add', (filePath: string) => {
+      const rel = path.relative(projectPath, filePath).replace(/\\/g, '/')
+      scheduleSync(rel, 'upsert', filePath)
+    })
+    watcher.on('change', (filePath: string) => {
+      const rel = path.relative(projectPath, filePath).replace(/\\/g, '/')
+      scheduleSync(rel, 'upsert', filePath)
+    })
+    watcher.on('unlink', (filePath: string) => {
+      const rel = path.relative(projectPath, filePath).replace(/\\/g, '/')
+      scheduleSync(rel, 'delete', filePath)
+    })
+
+    _watchers.set(projectId, watcher)
+  }).catch((err) => {
+    console.error('chokidar load error:', err)
   })
 }
 

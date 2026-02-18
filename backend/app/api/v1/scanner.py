@@ -437,6 +437,8 @@ async def _broadcast_scan_progress(
 
 async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | None) -> None:
     """Background task: scan project and generate test suggestions via AI."""
+    from app.core.engine import _get_effective_path
+
     async with async_session_factory() as db:
         try:
             # Load job
@@ -455,8 +457,11 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                 if config.database_url:
                     config.database_url = decrypt_value(config.database_url)
 
+            # Resolve effective path: use synced workspace if available
+            effective_path = _get_effective_path(job.project_id, project_path)
+
             # Read .env from project directory
-            dotenv_vars = _read_dotenv_from_project(project_path)
+            dotenv_vars = _read_dotenv_from_project(effective_path)
             # Merge with configured env vars (config overrides dotenv)
             pw_config = (config.playwright_config or {}) if config else {}
             configured_env = pw_config.get("env_vars", {}) if isinstance(pw_config, dict) else {}
@@ -476,8 +481,8 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                 entry_points = _find_entry_points_from_structure(structure)
                 job.files_found = structure.get("total_files", len(entry_points))
             else:
-                logger.info("scan: scanning path=%r", project_path)
-                entry_points = _find_entry_points_from_fs(project_path)
+                logger.info("scan: scanning path=%r (effective=%r)", project_path, effective_path)
+                entry_points = _find_entry_points_from_fs(effective_path)
                 logger.info("scan: found %d entry points", len(entry_points))
                 job.files_found = len(entry_points)
 

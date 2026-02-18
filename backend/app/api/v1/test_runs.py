@@ -234,7 +234,13 @@ async def stop_test_run(
     await db.commit()
     await db.refresh(test_run)
 
-    return test_run
+    # Reload with results so response serialization does not trigger async lazy load
+    result = await db.execute(
+        select(TestRun)
+        .where(TestRun.id == run_id, TestRun.project_id == project_id)
+        .options(selectinload(TestRun.results))
+    )
+    return result.scalar_one()
 
 
 @router.get("/{run_id}/results", response_model=list[TestResultResponse])

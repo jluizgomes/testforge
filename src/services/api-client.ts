@@ -186,6 +186,15 @@ export interface Trace {
   spans: Span[] | null
 }
 
+// ── Workspace Sync ────────────────────────────────────────────────────────────
+
+export interface WorkspaceSyncStatus {
+  synced: boolean
+  file_count: number
+  total_size_bytes: number
+  last_synced_at: string | null
+}
+
 // ── Code Quality ──────────────────────────────────────────────────────────────
 
 export interface CodeQualityInsight {
@@ -549,6 +558,18 @@ class ApiClient {
     return this.request('/api/v1/settings/validate', {
       method: 'POST',
       body: JSON.stringify({ type, url }),
+    })
+  }
+
+  // ── Workspace Sync ───────────────────────────────────────────────────────────
+
+  async getWorkspaceStatus(projectId: string): Promise<WorkspaceSyncStatus> {
+    return this.request(`/api/v1/projects/${projectId}/workspace`)
+  }
+
+  async clearWorkspace(projectId: string): Promise<void> {
+    await this.request(`/api/v1/projects/${projectId}/workspace`, {
+      method: 'DELETE',
     })
   }
 }

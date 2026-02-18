@@ -123,6 +123,8 @@ export function TestRunnerPage() {
   const [editorCode, setEditorCode] = useState(EDITOR_TEMPLATE)
   const [theme] = useState<'vs-dark' | 'light'>('vs-dark')
   const logsEndRef = useRef<HTMLDivElement>(null)
+  // Guard so polling never fires "Run completed" more than once per run
+  const runFinishedRef = useRef(false)
   const [activeLayerFilter, setActiveLayerFilter] = useState<string | null>(null)
   const [screenshotModal, setScreenshotModal] = useState<{
     url: string; name: string; status?: string; layer?: string
@@ -181,11 +183,28 @@ export function TestRunnerPage() {
       }
 
       if (status === 'passed' || status === 'failed' || status === 'cancelled') {
+        // Guard: polling can deliver the terminal status multiple times while
+        // React re-renders to stop the interval. Process completion only once.
+        if (runFinishedRef.current) return
+        runFinishedRef.current = true
+
         setIsRunning(false)
         addLog(
           status === 'passed' ? 'success' : 'error',
           `Run completed — status: ${status}`
         )
+
+        // Fetch run details to surface the actual error_message in the logs
+        if (status === 'failed' && activeProjectId && activeRunId) {
+          try {
+            const run = await apiClient.getTestRun(activeProjectId, activeRunId)
+            if (run.error_message) {
+              addLog('error', `Reason: ${run.error_message}`)
+            }
+          } catch {
+            // ignore — best effort
+          }
+        }
       }
     },
     [activeProjectId, activeRunId]
@@ -215,10 +234,15 @@ export function TestRunnerPage() {
     enabled: isRunning,
     onMessage: handleRunProgress,
     pollFn: pollRunFn,
+    isTerminal: (data) => {
+      const s = data.status as string | undefined
+      return s === 'passed' || s === 'failed' || s === 'cancelled'
+    },
   })
 
   const handleStart = async () => {
     if (!activeProjectId) return
+    runFinishedRef.current = false
     setIsRunning(true)
     setProgress(0)
     setResults([])
@@ -227,7 +251,32 @@ export function TestRunnerPage() {
     setLogs([])
 
     addLog('info', 'Starting test run…')
-    addLog('info', 'Initializing Playwright browser')
+
+    // Auto-sync: if running in Electron and workspace is not synced, upload now
+    const activeProject = projects.find((p) => p.id === activeProjectId)
+    if (window.electronAPI && activeProject?.path) {
+      try {
+        const ws = await apiClient.getWorkspaceStatus(activeProjectId)
+        if (!ws.synced) {
+          addLog('info', 'Syncing project files to container…')
+          const _backendUrl = useAppStore.getState().backendUrl || 'http://localhost:8000'
+          const syncResult = await window.electronAPI.file.syncProject(
+            activeProject.path,
+            activeProjectId,
+            _backendUrl
+          )
+          if (syncResult.success) {
+            addLog('success', `Project files synced (${syncResult.file_count ?? 0} files)`)
+          } else {
+            addLog('warn', `Sync skipped: ${syncResult.error ?? 'unknown error'}`)
+          }
+        }
+      } catch {
+        // Non-fatal — continue with existing path translation
+      }
+    }
+
+    addLog('info', 'Initializing test runner…')
 
     try {
       const run = await apiClient.startTestRun(activeProjectId)

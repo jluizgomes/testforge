@@ -54,6 +54,23 @@ const fileApi = {
 
   scanProject: (projectPath: string): Promise<Record<string, unknown>> =>
     ipcRenderer.invoke('fs:scan-project', projectPath),
+
+  syncProject: (projectPath: string, projectId: string, backendUrl: string): Promise<{ success: boolean; file_count?: number; files?: string[]; error?: string }> =>
+    ipcRenderer.invoke('fs:sync-project', { projectPath, projectId, backendUrl }),
+
+  watchProject: (projectPath: string, projectId: string, backendUrl: string): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke('fs:watch-project', { projectPath, projectId, backendUrl }),
+
+  unwatchProject: (projectId: string): Promise<void> =>
+    ipcRenderer.invoke('fs:unwatch-project', { projectId }),
+
+  onSyncProgress: (cb: (data: { step: string; current: number; file?: string }) => void): void => {
+    ipcRenderer.on('sync:progress', (_event, data) => cb(data))
+  },
+
+  offSyncProgress: (): void => {
+    ipcRenderer.removeAllListeners('sync:progress')
+  },
 }
 
 // Shell API
@@ -105,6 +122,5 @@ declare global {
       platform: NodeJS.Platform
       isElectron: boolean
     }
-    // Allow accessing file.readEnvFile in non-Electron environments (returns empty)
   }
 }
