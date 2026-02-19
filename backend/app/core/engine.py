@@ -34,6 +34,25 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+# ── Docker host-gateway URL fixup ─────────────────────────────────────────────
+# When the backend runs inside Docker, "localhost" in URLs refers to the
+# container itself, not the host machine. On Docker Desktop (Mac/Windows),
+# host.docker.internal resolves to the host, so services like the aurora
+# backend (running on host port 8000) become reachable from the container.
+_IS_DOCKER = Path("/.dockerenv").exists()
+_LOCALHOST_RE = re.compile(r"(https?://)(localhost|127\.0\.0\.1)(:\d+)")
+
+
+def _fix_host_url(url: str) -> str:
+    """Replace localhost/127.0.0.1 with host.docker.internal when in Docker.
+
+    No-op outside Docker or for non-HTTP(S) values.
+    """
+    if not _IS_DOCKER or not url.startswith(("http://", "https://")):
+        return url
+    return _LOCALHOST_RE.sub(r"\1host.docker.internal\3", url)
+
+
 # ── Per-project virtualenv ────────────────────────────────────────────────────
 # Each synced workspace gets its own isolated venv at:
 #   workspace/{project_id}/.testforge_venv/
@@ -803,15 +822,17 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
         if password and "TEST_LOGIN_PASSWORD" not in env_vars:
             env_vars["TEST_LOGIN_PASSWORD"] = password
 
-        backend_url = config.backend_url or ""
+        backend_url = _fix_host_url(config.backend_url or "")
         if backend_url:
             if "BACKEND_URL" not in env_vars:
                 env_vars["BACKEND_URL"] = backend_url
             if "API_BASE_URL" not in env_vars:
                 env_vars["API_BASE_URL"] = backend_url
 
-        if config.frontend_url and "FRONTEND_URL" not in env_vars:
-            env_vars["FRONTEND_URL"] = config.frontend_url
+        if config.frontend_url:
+            frontend_url = _fix_host_url(config.frontend_url)
+            if "FRONTEND_URL" not in env_vars:
+                env_vars["FRONTEND_URL"] = frontend_url
 
         # Try to obtain a JWT token so tests don't need to log in themselves
         if email and password and backend_url and "TEST_AUTH_TOKEN" not in env_vars:
@@ -857,7 +878,8 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
                         key = key.strip()
                         val = val.strip().strip("'\"")
                         if key and key not in env_vars:
-                            env_vars[key] = val
+                            # Translate localhost URLs so Docker tests can reach host services
+                            env_vars[key] = _fix_host_url(val)
                     logger.info("engine: loaded env from %s", dotenv_file)
                 except OSError:
                     pass

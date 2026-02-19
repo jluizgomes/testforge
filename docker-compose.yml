@@ -66,6 +66,10 @@ services:
       - ./backend:/app
       - workspace_data:/app/workspace
       - ${PROJECTS_PATH:-.}:${CONTAINER_WORKSPACE:-/workspace}:ro
+    extra_hosts:
+      # Allows tests running inside the container to reach services on the host
+      # (e.g. the project's own backend at localhost:8000 on the Mac).
+      - "host.docker.internal:host-gateway"
     command: ["./entrypoint.sh", "--reload", "--reload-dir", "app"]
 
 networks:

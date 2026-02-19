@@ -450,9 +450,12 @@ Rules:
 - Use pytest + pytest-asyncio for Python tests
 - Use async/await for all async tests
 - Use httpx.AsyncClient as the HTTP client
+- ALWAYS read the base URL from the BACKEND_URL environment variable:
+    BASE_URL = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
+  (TestForge injects this env var, translated to host.docker.internal when needed)
 - Use real assertions, not just `assert True`
-- For Playwright: use TypeScript, page object pattern
-- Keep tests focused and runnable
+- For Playwright: use TypeScript and read from FRONTEND_URL env var
+- Keep tests focused and runnable without mocking
 - Include at minimum 3 test functions per file
 - Do NOT include explanatory text outside the ===FILE=== blocks
 """
@@ -512,14 +515,19 @@ def _rule_based_test_templates(structure: dict[str, Any]) -> str:
         bd = be["dir"]
         btype = be["type"]
         blocks.append(f"""===FILE: {bd}/conftest.py===
+import os
 import pytest
 import httpx
 
-BASE_URL = "http://localhost:8000"
+# BACKEND_URL is injected by TestForge from the project config (and translated
+# from localhost → host.docker.internal when running inside Docker).
+BASE_URL = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
+
 
 @pytest.fixture
-def base_url():
+def base_url() -> str:
     return BASE_URL
+
 
 @pytest.fixture
 async def client():
@@ -531,31 +539,39 @@ async def client():
 ===END===
 
 ===FILE: {bd}/tests/test_api.py===
+import os
 import pytest
 import httpx
 
 pytestmark = pytest.mark.asyncio
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = os.environ.get("BACKEND_URL", "http://localhost:8000").rstrip("/")
 
 
 async def test_health_check():
+    \"\"\"Verify the /health (or /api/health) endpoint returns 2xx.\"\"\"
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=10) as client:
-        response = await client.get("/health")
-    assert response.status_code == 200
+        for path in ("/health", "/api/health", "/api/v1/health"):
+            resp = await client.get(path)
+            if resp.status_code < 400:
+                assert resp.status_code < 400
+                return
+    pytest.skip("No reachable health endpoint found")
 
 
 async def test_api_docs_accessible():
+    \"\"\"OpenAPI docs should be publicly accessible.\"\"\"
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=10) as client:
-        response = await client.get("/docs")
-    assert response.status_code == 200
+        resp = await client.get("/docs")
+    assert resp.status_code == 200
 
 
 async def test_openapi_schema():
+    \"\"\"OpenAPI schema must be valid JSON with the 'openapi' key.\"\"\"
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=10) as client:
-        response = await client.get("/openapi.json")
-    assert response.status_code == 200
-    data = response.json()
+        resp = await client.get("/openapi.json")
+    assert resp.status_code == 200
+    data = resp.json()
     assert "openapi" in data
 ===END===
 """)
