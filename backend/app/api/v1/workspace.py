@@ -675,10 +675,32 @@ async def upload_workspace(
             status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid ZIP: {exc}"
         ) from exc
 
-    # Atomically swap: remove old workspace, rename tmp → ws
+    # Preserve the isolated venv across workspace swaps so the next test run
+    # doesn't need to reinstall dependencies (the hash check will handle
+    # requirements changes — only reinstalls when requirements.txt changes).
+    _venv_name = ".testforge_venv"
+    _venv_stash = _WORKSPACE_ROOT / f"{project_id}.venv"
+    venv_stashed = False
     if ws.exists():
+        venv_src = ws / _venv_name
+        if venv_src.exists():
+            try:
+                if _venv_stash.exists():
+                    shutil.rmtree(_venv_stash)
+                venv_src.rename(_venv_stash)   # O(1) on same volume
+                venv_stashed = True
+            except OSError:
+                pass  # can't save — venv will rebuild on next run
         shutil.rmtree(ws)
     tmp.rename(ws)
+
+    # Restore the stashed venv into the new workspace
+    if venv_stashed and _venv_stash.exists():
+        try:
+            _venv_stash.rename(ws / _venv_name)
+            logger.info("workspace: restored venv for project %s (deps cached)", project_id)
+        except OSError:
+            pass  # restore failed — venv will rebuild harmlessly
 
     # Scaffold minimal pytest infrastructure if the project needs it
     _scaffold_pytest_if_needed(ws)
@@ -769,6 +791,10 @@ async def clear_workspace(
     if ws.exists():
         shutil.rmtree(ws)
         logger.info("workspace: cleared workspace for project %s", project_id)
+    # Also remove the stashed venv (if any)
+    venv_stash = _WORKSPACE_ROOT / f"{project_id}.venv"
+    if venv_stash.exists():
+        shutil.rmtree(venv_stash)
 
 
 @router.post("/{project_id}/workspace/scaffold")
@@ -811,9 +837,20 @@ async def scaffold_project_tests(
     )
     _write_manifest(ws, all_files)
 
+    # 5. Return file contents so the frontend can write them to the host project
+    created_files_with_content: list[dict[str, str]] = []
+    for rel in ai_files:
+        p = ws / rel
+        try:
+            content = p.read_text(encoding="utf-8") if p.is_file() else ""
+        except OSError:
+            content = ""
+        created_files_with_content.append({"path": rel, "content": content})
+
     return {
         "structure": structure,
-        "created_files": ai_files,
+        "created_files": ai_files,                          # backward-compat list of paths
+        "created_files_with_content": created_files_with_content,
         "total_files": len(all_files),
     }
 

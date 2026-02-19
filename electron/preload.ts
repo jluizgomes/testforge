@@ -71,6 +71,12 @@ const fileApi = {
   offSyncProgress: (): void => {
     ipcRenderer.removeAllListeners('sync:progress')
   },
+
+  writeGeneratedFiles: (
+    projectPath: string,
+    files: { path: string; content: string }[],
+  ): Promise<{ success: boolean; written: number; errors: string[] }> =>
+    ipcRenderer.invoke('fs:write-generated-files', { projectPath, files }),
 }
 
 // Shell API

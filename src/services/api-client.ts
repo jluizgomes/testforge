@@ -584,6 +584,7 @@ class ApiClient {
   async scaffoldProjectTests(projectId: string): Promise<{
     structure: Record<string, unknown>
     created_files: string[]
+    created_files_with_content: { path: string; content: string }[]
     total_files: number
   }> {
     return this.request(`/api/v1/projects/${projectId}/workspace/scaffold`, {

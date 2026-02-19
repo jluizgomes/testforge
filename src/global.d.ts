@@ -18,6 +18,7 @@ interface ElectronFileApi {
   unwatchProject(projectId: string): Promise<void>
   onSyncProgress(cb: (data: { step: string; current: number; file?: string }) => void): void
   offSyncProgress(): void
+  writeGeneratedFiles(projectPath: string, files: { path: string; content: string }[]): Promise<{ success: boolean; written: number; errors: string[] }>
 }
 
 interface ElectronShellApi {

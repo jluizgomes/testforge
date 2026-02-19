@@ -414,6 +414,41 @@ function setupIpcHandlers() {
       }
     }
   )
+
+  /**
+   * fs:write-generated-files — Write AI-generated test files from the Docker
+   * workspace back to the host project directory so they live alongside the
+   * project's source code and can be committed to version control.
+   *
+   * Input:  { projectPath: string, files: { path: string, content: string }[] }
+   * Output: { success: boolean, written: number, errors: string[] }
+   */
+  ipcMain.handle(
+    'fs:write-generated-files',
+    (_event, { projectPath, files }: {
+      projectPath: string
+      files: { path: string; content: string }[]
+    }): { success: boolean; written: number; errors: string[] } => {
+      let written = 0
+      const errors: string[] = []
+      for (const { path: relPath, content } of files) {
+        // Guard against path traversal
+        const fullPath = path.resolve(projectPath, relPath)
+        if (!fullPath.startsWith(path.resolve(projectPath))) {
+          errors.push(`Blocked unsafe path: ${relPath}`)
+          continue
+        }
+        try {
+          fs.mkdirSync(path.dirname(fullPath), { recursive: true })
+          fs.writeFileSync(fullPath, content, 'utf-8')
+          written++
+        } catch (err) {
+          errors.push(`${relPath}: ${(err as Error).message}`)
+        }
+      }
+      return { success: errors.length === 0, written, errors }
+    }
+  )
 }
 
 // ── Watcher helper (outside setupIpcHandlers to allow reuse) ─────────────────

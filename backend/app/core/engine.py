@@ -466,43 +466,51 @@ def _detect_runner(
                 d2 = sub / sub2
                 if d2.is_dir():
                     search_dirs.append(d2)
-    for root in search_dirs:
-        for cfg in playwright_configs:
-            if (root / cfg).exists():
-                npx = shutil.which("npx") or "npx"
-                cmd = [npx, "playwright", "test", "--reporter=json"]
-                if parallel_workers > 1:
-                    cmd += [f"--workers={parallel_workers}"]
-                if retry_count > 0:
-                    cmd += [f"--retries={retry_count}"]
-                if test_timeout != 30000:
-                    cmd += [f"--timeout={test_timeout}"]
-                if browser and browser in ("chromium", "firefox", "webkit"):
-                    cmd += [f"--project={browser}"]
-                return "frontend", cmd, str(root)
-    # Glob for playwright.config.* anywhere under base (max depth 4 for monorepos)
-    try:
-        for path in base.rglob("playwright.config.*"):
-            if path.suffix in (".ts", ".js", ".mjs") and path.is_file():
-                try:
-                    if len(path.relative_to(base).parts) > 4:
+    # Only use Playwright if npx is actually available in the container.
+    # If running in a Python-only Docker image, npx won't be installed and
+    # trying to exec it causes [Errno 2] No such file or directory.
+    npx = shutil.which("npx")
+    if npx:
+        for root in search_dirs:
+            for cfg in playwright_configs:
+                if (root / cfg).exists():
+                    cmd = [npx, "playwright", "test", "--reporter=json"]
+                    if parallel_workers > 1:
+                        cmd += [f"--workers={parallel_workers}"]
+                    if retry_count > 0:
+                        cmd += [f"--retries={retry_count}"]
+                    if test_timeout != 30000:
+                        cmd += [f"--timeout={test_timeout}"]
+                    if browser and browser in ("chromium", "firefox", "webkit"):
+                        cmd += [f"--project={browser}"]
+                    return "frontend", cmd, str(root)
+        # Glob for playwright.config.* anywhere under base (max depth 4 for monorepos)
+        try:
+            for path in base.rglob("playwright.config.*"):
+                if path.suffix in (".ts", ".js", ".mjs") and path.is_file():
+                    try:
+                        if len(path.relative_to(base).parts) > 4:
+                            continue
+                    except ValueError:
                         continue
-                except ValueError:
-                    continue
-                root = path.parent
-                npx = shutil.which("npx") or "npx"
-                cmd = [npx, "playwright", "test", "--reporter=json"]
-                if parallel_workers > 1:
-                    cmd += [f"--workers={parallel_workers}"]
-                if retry_count > 0:
-                    cmd += [f"--retries={retry_count}"]
-                if test_timeout != 30000:
-                    cmd += [f"--timeout={test_timeout}"]
-                if browser and browser in ("chromium", "firefox", "webkit"):
-                    cmd += [f"--project={browser}"]
-                return "frontend", cmd, str(root)
-    except OSError:
-        pass
+                    root = path.parent
+                    cmd = [npx, "playwright", "test", "--reporter=json"]
+                    if parallel_workers > 1:
+                        cmd += [f"--workers={parallel_workers}"]
+                    if retry_count > 0:
+                        cmd += [f"--retries={retry_count}"]
+                    if test_timeout != 30000:
+                        cmd += [f"--timeout={test_timeout}"]
+                    if browser and browser in ("chromium", "firefox", "webkit"):
+                        cmd += [f"--project={browser}"]
+                    return "frontend", cmd, str(root)
+        except OSError:
+            pass
+    else:
+        logger.info(
+            "engine: npx not found in PATH — skipping Playwright detection "
+            "(install Node.js in the container to enable frontend tests)"
+        )
 
     # pytest — search root first, then common monorepo backend subdirs.
     # Also treat requirements.txt as a fallback indicator (project may lack explicit
@@ -550,17 +558,18 @@ def _detect_runner(
                 )
                 return "backend", cmd, str(_pytest_dir)
 
-    # package.json test script
-    pkg = base / "package.json"
-    if pkg.exists():
-        try:
-            data = json.loads(pkg.read_text())
-            scripts = data.get("scripts", {})
-            if "test" in scripts:
-                npm = shutil.which("npm") or "npm"
-                return "frontend", [npm, "run", "test", "--", "--reporter=json"], str(base)
-        except Exception:
-            pass
+    # package.json test script — only if npm is available
+    npm = shutil.which("npm")
+    if npm:
+        pkg = base / "package.json"
+        if pkg.exists():
+            try:
+                data = json.loads(pkg.read_text())
+                scripts = data.get("scripts", {})
+                if "test" in scripts:
+                    return "frontend", [npm, "run", "test", "--", "--reporter=json"], str(base)
+            except Exception:
+                pass
 
     try:
         top = sorted(base.iterdir(), key=lambda p: p.name)[:15]
@@ -642,11 +651,22 @@ def _parse_playwright_output(raw: str) -> list[dict[str, Any]]:
 
 
 def _parse_pytest_output(raw: str) -> list[dict[str, Any]]:
-    """Parse pytest --json-report stdout into a list of result dicts."""
+    """Parse pytest --json-report stdout into a list of result dicts.
+
+    Stdout may contain pytest progress output before the JSON; find the last {...}.
+    """
     results: list[dict[str, Any]] = []
+    data = None
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
+        start = raw.rfind("{")
+        if start != -1:
+            try:
+                data = json.loads(raw[start:])
+            except json.JSONDecodeError:
+                pass
+    if not data:
         return results
 
     for t in data.get("tests", []):
@@ -871,12 +891,41 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
     # ── Build subprocess env (inherit + inject project vars) ──────────────────
     proc_env = {**os.environ, **env_vars}
 
+    # ── Pre-flight: verify executable and cwd exist before launching ──────────
+    exec_path = Path(cmd[0])
+    if not exec_path.is_absolute():
+        # For PATH-resolved executables (pytest, npx, npm) double-check they exist
+        exec_path = Path(shutil.which(cmd[0]) or cmd[0])
+    if not exec_path.exists():
+        msg = (
+            f"Executable not found: {cmd[0]!r}. "
+            "If running in Docker, ensure Node.js/npm is installed for frontend tests, "
+            "or use a synced workspace so the backend venv pytest can be used."
+        )
+        test_run.status = TestRunStatus.FAILED
+        test_run.error_message = msg
+        test_run.completed_at = datetime.now(timezone.utc)
+        await db.commit()
+        await _broadcast_run(run_id, {"status": "failed", "error_message": msg})
+        logger.error("engine: %s", msg)
+        return
+    if not Path(run_cwd).is_dir():
+        msg = f"Test working directory not found: {run_cwd!r}"
+        test_run.status = TestRunStatus.FAILED
+        test_run.error_message = msg
+        test_run.completed_at = datetime.now(timezone.utc)
+        await db.commit()
+        await _broadcast_run(run_id, {"status": "failed", "error_message": msg})
+        logger.error("engine: %s", msg)
+        return
+
     logger.info(
         "engine: running %s in cwd=%s (env_vars=%d keys)",
         " ".join(cmd),
         run_cwd,
         len(env_vars),
     )
+    await _broadcast_run(run_id, {"log": f"[run] {' '.join(cmd[:2])} in {run_cwd}"})
 
     # ── Concurrency guard ─────────────────────────────────────────────────────
     if len(_running_processes) >= MAX_CONCURRENT_RUNS:
@@ -945,6 +994,16 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
         parsed = _parse_playwright_output(stdout_text)
     else:
         parsed = _parse_pytest_output(stdout_text)
+        # pytest-json-report may write to .report.json when stdout is not used
+        if not parsed and run_cwd:
+            for report_file in (Path(run_cwd) / ".report.json", Path(run_cwd) / "report.json"):
+                if report_file.exists():
+                    try:
+                        parsed = _parse_pytest_output(report_file.read_text(encoding="utf-8"))
+                        if parsed:
+                            break
+                    except OSError:
+                        pass
 
     # Fallback: if parsing failed, create a single result from return code
     if not parsed:

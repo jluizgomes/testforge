@@ -127,7 +127,11 @@ export function ProjectDetail() {
 
   // Scaffold state
   const [isScaffolding, setIsScaffolding] = useState(false)
-  const [scaffoldResult, setScaffoldResult] = useState<{ created_files: string[] } | null>(null)
+  const [scaffoldResult, setScaffoldResult] = useState<{
+    created_files: string[]
+    written_to_project: boolean
+    write_errors: string[]
+  } | null>(null)
 
   const handleScaffold = async () => {
     if (!projectId) return
@@ -135,7 +139,29 @@ export function ProjectDetail() {
     setScaffoldResult(null)
     try {
       const result = await apiClient.scaffoldProjectTests(projectId)
-      setScaffoldResult(result)
+
+      // Write generated files back to the host project folder (Electron only)
+      let writtenToProject = false
+      let writeErrors: string[] = []
+      const isElectron = !!(window.electronAPI)
+      if (isElectron && project?.path && result.created_files_with_content?.length > 0) {
+        try {
+          const writeResult = await window.electronAPI!.file.writeGeneratedFiles(
+            project.path,
+            result.created_files_with_content,
+          )
+          writtenToProject = writeResult.success
+          writeErrors = writeResult.errors
+        } catch (err) {
+          writeErrors = [(err as Error).message]
+        }
+      }
+
+      setScaffoldResult({
+        created_files: result.created_files,
+        written_to_project: writtenToProject,
+        write_errors: writeErrors,
+      })
     } catch (err) {
       console.error('Scaffold failed:', err)
     } finally {
@@ -815,6 +841,18 @@ export function ProjectDetail() {
                         <span className="text-xs font-medium text-purple-700">
                           {scaffoldResult.created_files.length} test files generated
                         </span>
+                        {scaffoldResult.written_to_project && (
+                          <span className="ml-auto text-[10px] text-green-600 font-medium flex items-center gap-1">
+                            <CheckCircle2 className="h-3 w-3" />
+                            saved to project
+                          </span>
+                        )}
+                        {scaffoldResult.write_errors.length > 0 && (
+                          <span className="ml-auto text-[10px] text-yellow-600 font-medium flex items-center gap-1" title={scaffoldResult.write_errors.join('\n')}>
+                            <AlertCircle className="h-3 w-3" />
+                            write errors
+                          </span>
+                        )}
                       </div>
                       <div className="max-h-40 overflow-y-auto">
                         {scaffoldResult.created_files.map((f) => (

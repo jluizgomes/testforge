@@ -194,22 +194,18 @@ export function TestRunnerPage() {
         runFinishedRef.current = true
 
         setIsRunning(false)
-        addLog(
-          status === 'passed' ? 'success' : 'error',
-          `Run completed — status: ${status}`
-        )
-
-        // Fetch run details to surface the actual error_message in the logs
+        let completionMsg = `Run completed — status: ${status}`
         if (status === 'failed' && activeProjectId && activeRunId) {
           try {
             const run = await apiClient.getTestRun(activeProjectId, activeRunId)
             if (run.error_message) {
-              addLog('error', `Reason: ${run.error_message}`)
+              completionMsg += `. Reason: ${run.error_message}`
             }
           } catch {
             // ignore — best effort
           }
         }
+        addLog(status === 'passed' ? 'success' : 'error', completionMsg)
       }
     },
     [activeProjectId, activeRunId]
