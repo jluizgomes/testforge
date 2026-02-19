@@ -1477,14 +1477,41 @@ async def get_scan_status(
 async def list_generated_tests(
     project_id: str,
     db: AsyncSession = Depends(get_db),
-) -> list[GeneratedTest]:
+) -> list[GeneratedTestResponse]:
     """List AI-generated test suggestions for a project."""
-    result = await db.execute(
-        select(GeneratedTest)
-        .where(GeneratedTest.project_id == project_id)
-        .order_by(GeneratedTest.created_at.desc())
-    )
-    return list(result.scalars().all())
+    try:
+        result = await db.execute(
+            select(GeneratedTest)
+            .where(GeneratedTest.project_id == project_id)
+            .order_by(GeneratedTest.created_at.desc())
+        )
+        rows = result.scalars().all()
+    except Exception as e:
+        logger.exception("list_generated_tests query failed for project %s: %s", project_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to load generated tests",
+        ) from e
+    out: list[GeneratedTestResponse] = []
+    for gt in rows:
+        try:
+            out.append(
+                GeneratedTestResponse(
+                    id=str(gt.id),
+                    scan_job_id=str(gt.scan_job_id),
+                    project_id=str(gt.project_id),
+                    test_name=gt.test_name or "",
+                    test_code=gt.test_code or "",
+                    test_type=gt.test_type or "e2e",
+                    test_language=gt.test_language,
+                    entry_point=gt.entry_point,
+                    accepted=bool(gt.accepted) if gt.accepted is not None else False,
+                    created_at=gt.created_at,
+                )
+            )
+        except Exception as e:
+            logger.warning("list_generated_tests skip row %s: %s", getattr(gt, "id", None), e)
+    return out
 
 
 class ScanStatsResponse(BaseModel):
