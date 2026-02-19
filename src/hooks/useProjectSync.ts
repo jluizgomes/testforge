@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiClient, type WorkspaceSyncStatus } from '@/services/api-client'
 import { useAppStore } from '@/stores/app-store'
@@ -32,8 +32,10 @@ export function useProjectSync(
   const [isWatching, setIsWatching] = useState(false)
   const [progress, setProgress] = useState<SyncProgress>(IDLE)
   const filesRef = useRef<string[]>([])
+  // Tracks whether we've already seeded progress from the persisted status
+  const seededFromStatus = useRef(false)
   const queryClient = useQueryClient()
-  const backendUrl = useAppStore.getState().backendUrl || 'http://localhost:8000'
+  const backendUrl = useAppStore.getState().backendUrl || 'http://localhost:8001'
 
   const { data: status = null } = useQuery({
     queryKey: ['workspace-status', projectId],
@@ -42,6 +44,22 @@ export function useProjectSync(
     refetchInterval: 30_000,
     retry: false,
   })
+
+  // Restore file list from persisted backend manifest after navigation / page reload
+  useEffect(() => {
+    if (seededFromStatus.current || isSyncing) return
+    if (status !== null) {
+      seededFromStatus.current = true
+      if (status.synced && status.files.length > 0) {
+        setProgress({
+          step: 'done',
+          current: status.file_count,
+          lastFile: '',
+          files: status.files,
+        })
+      }
+    }
+  }, [status, isSyncing])
 
   const sync = useCallback(async () => {
     if (!projectId || !projectPath || !window.electronAPI) return
@@ -106,6 +124,7 @@ export function useProjectSync(
     }
     setIsWatching(false)
     setProgress(IDLE)
+    seededFromStatus.current = false   // allow re-seeding if workspace is re-synced
     try {
       await apiClient.clearWorkspace(projectId)
       await queryClient.invalidateQueries({ queryKey: ['workspace-status', projectId] })

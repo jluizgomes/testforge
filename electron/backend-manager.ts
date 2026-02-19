@@ -25,7 +25,10 @@ export class BackendManager {
   private startupTimeout: NodeJS.Timeout | null = null
 
   private readonly isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
+  /** Default when spawning our own backend. Docker TestForge uses 8001 on host. */
   private readonly defaultPort = 8000
+  /** In dev, prefer this port first (TestForge Docker) so we don't reuse Aurora on 8000. */
+  private readonly dockerPort = 8001
   private readonly healthCheckPath = '/health'
   private readonly maxStartupTime = 30000 // 30 seconds
   private readonly healthCheckIntervalMs = 10000 // 10 seconds
@@ -39,10 +42,17 @@ export class BackendManager {
     this.error = undefined
 
     try {
-      // In dev, use existing backend on default port if already running (e.g. Docker from make dev-electron)
+      // In dev, prefer TestForge Docker (8001) so we don't reuse another app on 8000 (e.g. Aurora)
       if (this.isDev) {
-        const existing = await this.checkBackendAtPort(this.defaultPort)
-        if (existing) {
+        const onDocker = await this.checkBackendAtPort(this.dockerPort)
+        if (onDocker) {
+          this.port = this.dockerPort
+          this.status = 'running'
+          this.startHealthCheckLoop()
+          return { success: true }
+        }
+        const onDefault = await this.checkBackendAtPort(this.defaultPort)
+        if (onDefault) {
           this.port = this.defaultPort
           this.status = 'running'
           this.startHealthCheckLoop()

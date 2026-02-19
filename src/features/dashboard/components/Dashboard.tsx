@@ -96,13 +96,13 @@ export function Dashboard() {
     },
     {
       name: 'Database',
-      status: health?.services.database?.status ?? 'unknown',
-      latency: health?.services.database?.latency_ms,
+      status: health?.services?.database?.status ?? 'unknown',
+      latency: health?.services?.database?.latency_ms,
     },
     {
       name: 'Redis',
-      status: health?.services.redis?.status ?? 'unknown',
-      latency: health?.services.redis?.latency_ms,
+      status: health?.services?.redis?.status ?? 'unknown',
+      latency: health?.services?.redis?.latency_ms,
     },
   ]
 

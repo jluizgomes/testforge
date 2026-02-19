@@ -43,6 +43,7 @@ import {
   AlertCircle,
   RefreshCw,
   HardDrive,
+  Wand2,
 } from 'lucide-react'
 import {
   ResponsiveContainer,
@@ -123,6 +124,41 @@ export function ProjectDetail() {
   // Workspace sync
   const { status: wsStatus, isSyncing, isWatching, progress: syncProgress, sync: syncWorkspace, unsync: unsyncWorkspace } =
     useProjectSync(projectId ?? null, project?.path ?? null)
+
+  // Scaffold state
+  const [isScaffolding, setIsScaffolding] = useState(false)
+  const [scaffoldResult, setScaffoldResult] = useState<{ created_files: string[] } | null>(null)
+
+  const handleScaffold = async () => {
+    if (!projectId) return
+    setIsScaffolding(true)
+    setScaffoldResult(null)
+    try {
+      const result = await apiClient.scaffoldProjectTests(projectId)
+      setScaffoldResult(result)
+    } catch (err) {
+      console.error('Scaffold failed:', err)
+    } finally {
+      setIsScaffolding(false)
+    }
+  }
+
+  const handleDownload = async () => {
+    if (!projectId) return
+    try {
+      const blob = await apiClient.downloadWorkspace(projectId)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `testforge-workspace-${projectId.slice(0, 8)}.zip`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      console.error('Download failed:', err)
+    }
+  }
 
   // Runs tab: delete
   const deleteRunMutation = useMutation({
@@ -636,7 +672,7 @@ export function ProjectDetail() {
                       </span>
                     )}
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex gap-1.5 flex-wrap">
                     <Button
                       size="sm"
                       variant="outline"
@@ -651,6 +687,35 @@ export function ProjectDetail() {
                       )}
                       {isSyncing ? 'Syncing…' : 'Sync Now'}
                     </Button>
+                    {wsStatus?.synced && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2 text-xs text-purple-600 border-purple-300 hover:bg-purple-50"
+                        onClick={handleScaffold}
+                        disabled={isScaffolding || isSyncing}
+                        title="Analyse project and generate test files using AI"
+                      >
+                        {isScaffolding ? (
+                          <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Wand2 className="mr-1 h-3.5 w-3.5" />
+                        )}
+                        {isScaffolding ? 'Generating…' : 'Generate Tests'}
+                      </Button>
+                    )}
+                    {wsStatus?.synced && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2 text-xs"
+                        onClick={handleDownload}
+                        title="Download all workspace files (including generated tests) as ZIP"
+                      >
+                        <Download className="mr-1 h-3.5 w-3.5" />
+                        Download
+                      </Button>
+                    )}
                     {wsStatus?.synced && (
                       <Button
                         size="sm"
@@ -740,6 +805,25 @@ export function ProjectDetail() {
                         </div>
                       )}
                     </>
+                  )}
+
+                  {/* ── Scaffold result (shown after AI generation) ── */}
+                  {scaffoldResult && scaffoldResult.created_files.length > 0 && (
+                    <div className="rounded-md border border-purple-200 bg-purple-50/40 overflow-hidden">
+                      <div className="px-3 py-1.5 border-b border-purple-200 bg-purple-50/60 flex items-center gap-2">
+                        <Wand2 className="h-3.5 w-3.5 text-purple-600" />
+                        <span className="text-xs font-medium text-purple-700">
+                          {scaffoldResult.created_files.length} test files generated
+                        </span>
+                      </div>
+                      <div className="max-h-40 overflow-y-auto">
+                        {scaffoldResult.created_files.map((f) => (
+                          <div key={f} className="px-3 py-0.5 font-mono text-[11px] text-purple-700 hover:bg-purple-50 truncate">
+                            + {f}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   )}
 
                   {/* ── File list (shown after sync completes) ── */}

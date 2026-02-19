@@ -193,6 +193,7 @@ export interface WorkspaceSyncStatus {
   file_count: number
   total_size_bytes: number
   last_synced_at: string | null
+  files: string[]   // up to 500 relative paths; persisted via manifest on the backend
 }
 
 // ── Code Quality ──────────────────────────────────────────────────────────────
@@ -248,12 +249,19 @@ export interface CreateScheduleInput {
 // ── API Client ────────────────────────────────────────────────────────────────
 
 class ApiClient {
-  private static readonly DEFAULT_BASE_URL = 'http://localhost:8000'
+  private static readonly DEFAULT_BASE_URL = 'http://localhost:8001'
 
   private getBaseUrl(): string {
-    const storeUrl = useAppStore.getState().backendUrl
+    // In browser dev (same origin as Vite), use proxy to avoid CORS
+    if (import.meta.env.DEV && typeof window !== 'undefined' && !window.electronAPI) return ''
+    let storeUrl = useAppStore.getState().backendUrl
+    // In dev, stored 8000 often points to another app (e.g. Aurora); prefer TestForge Docker on 8001
+    if (import.meta.env.DEV && storeUrl === 'http://localhost:8000') storeUrl = 'http://localhost:8001'
     if (storeUrl) return storeUrl
-    return import.meta.env.VITE_API_URL || ApiClient.DEFAULT_BASE_URL
+    const envUrl = import.meta.env.VITE_API_URL
+    if (envUrl !== undefined && envUrl !== '') return envUrl
+    if (import.meta.env.DEV) return ''
+    return ApiClient.DEFAULT_BASE_URL
   }
 
   // ── HTTP helper ──────────────────────────────────────────────────────────
@@ -571,6 +579,26 @@ class ApiClient {
     await this.request(`/api/v1/projects/${projectId}/workspace`, {
       method: 'DELETE',
     })
+  }
+
+  async scaffoldProjectTests(projectId: string): Promise<{
+    structure: Record<string, unknown>
+    created_files: string[]
+    total_files: number
+  }> {
+    return this.request(`/api/v1/projects/${projectId}/workspace/scaffold`, {
+      method: 'POST',
+    })
+  }
+
+  async downloadWorkspace(projectId: string): Promise<Blob> {
+    const url = `${this.getBaseUrl()}/api/v1/projects/${projectId}/workspace/download`
+    const response = await fetch(url)
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}))
+      throw new Error((err as { detail?: string }).detail || `HTTP ${response.status}`)
+    }
+    return response.blob()
   }
 }
 

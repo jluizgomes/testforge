@@ -93,10 +93,10 @@ export const useAppStore = create<AppState>()(
             })
           }
         } else {
-          // Development without Electron: backend in Docker or local (localhost:8000)
+          // Development without Electron: prefer TestForge Docker on 8001 (avoid Aurora on 8000)
           set({
-            backendUrl: 'http://localhost:8000',
-            backendStatus: { status: 'running', port: 8000 },
+            backendUrl: 'http://localhost:8001',
+            backendStatus: { status: 'running', port: 8001 },
           })
         }
       },

@@ -34,36 +34,102 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Extensions considered "interesting" for test generation
-_ENTRY_POINT_EXTENSIONS = {".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java"}
-_SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", "dist", "build", ".next"}
-_ROUTE_PATTERNS = [
-    re.compile(r"(router|Route|app)\.(get|post|put|delete|patch)\s*\("),  # Express / FastAPI
-    re.compile(r"export\s+default\s+function\s+\w+Page"),                 # Next.js page
-    re.compile(r"@router\.(get|post|put|delete|patch)\s*\("),             # FastAPI router decorator
-    re.compile(r"createBrowserRouter|<Route\s"),                           # React Router
+_ENTRY_POINT_EXTENSIONS = {
+    ".ts", ".tsx", ".js", ".jsx",           # JS/TS ecosystem
+    ".py", ".go", ".java", ".rb", ".php",   # Backend languages
+    ".vue", ".svelte",                       # Framework components
+}
+_SKIP_DIRS = {
+    "node_modules", ".git", "__pycache__", ".venv", "venv",
+    "dist", "build", ".next", ".testforge_venv",
+    ".pytest_cache", "htmlcov", ".cache", "__mocks__",
+    "coverage", ".nyc_output", "storybook-static",
+}
+
+# Patterns that signal a file has testable behaviour
+_ENTRY_PATTERNS = [
+    # HTTP routes — Express, FastAPI, Flask, Django, Koa
+    re.compile(r"(router|Route|app|blueprint)\.(get|post|put|delete|patch|head)\s*\("),
+    re.compile(r"@(router|app|bp)\.(get|post|put|delete|patch)\s*\("),
+    # Class-based views & serializers
+    re.compile(r"class\s+\w+(View|ViewSet|APIView|Serializer|Schema|Controller|Resource)\s*[\(:]"),
+    # Service / use-case / repository layer
+    re.compile(r"class\s+\w+(Service|UseCase|Repository|Manager|Handler|Provider|Facade)\s*[\(:]"),
+    # React / Vue / Svelte components
+    re.compile(r"(useState|useEffect|useContext|useCallback|useMemo|useReducer)\s*\("),
+    re.compile(r"export\s+(default\s+)?(function|const|class)\s+[A-Z]\w+"),
+    re.compile(r"<template>|defineComponent|setup\(\)"),
+    # Next.js / Nuxt pages
+    re.compile(r"export\s+default\s+function\s+\w+Page"),
+    re.compile(r"getServerSideProps|getStaticProps|definePageComponent"),
+    # Celery / background tasks
+    re.compile(r"@(shared_task|app\.task|celery\.task)"),
+    # Pytest / Jest / Mocha — existing test files are useful as AI reference
+    re.compile(r"(def test_|it\(|describe\(|test\(|@pytest)"),
+    # Generic: any named function that looks like a public API
+    re.compile(r"^(async\s+)?def\s+[a-z]\w+\s*\(", re.MULTILINE),
+    re.compile(r"^(export\s+)?(async\s+)?function\s+[a-z]\w+\s*\(", re.MULTILINE),
 ]
-# Path segments that indicate database-related files
+
+# Path-segment keywords for database classification
 _DATABASE_PATH_RE = re.compile(
-    r"(models?|migrations?|schema|repositor|dao|entit|seeds?|fixtures?|orm|database|prisma|typeorm|sequelize|knex)",
+    r"(models?|migrations?|schema|repositor|dao|entit|seeds?|fixtures?|orm|"
+    r"database|prisma|typeorm|sequelize|knex|alembic|eloquent|activerecord)",
+    re.IGNORECASE,
+)
+# Content patterns for service/integration layer
+_SERVICE_PATH_RE = re.compile(
+    r"(service[s]?|use.?case[s]?|handler[s]?|provider[s]?|manager[s]?|"
+    r"helper[s]?|util[s]?|lib[s]?|client[s]?|adapter[s]?)",
+    re.IGNORECASE,
+)
+# Content patterns for E2E / page layer
+_PAGE_PATH_RE = re.compile(
+    r"(pages?|views?|screen[s]?|layout[s]?|template[s]?|component[s]?)",
     re.IGNORECASE,
 )
 
 
 def _classify_entry_point(ep: dict[str, Any]) -> str:
-    """Classify an entry point as 'backend', 'frontend', or 'database'."""
-    path = ep.get("path", "")
-    extension = ep.get("extension", Path(path).suffix)
+    """Classify an entry point as api/e2e/unit/integration/database/component.
 
-    # Frontend files (.ts, .tsx, .js, .jsx)
-    if extension in {".ts", ".tsx", ".js", ".jsx"}:
-        return "frontend"
+    Uses both the file path and a snippet of the source content for accuracy.
+    """
+    path = ep.get("path", "").replace("\\", "/").lower()
+    extension = ep.get("extension", Path(path).suffix).lower()
+    content = ep.get("content_preview", "")
 
-    # Database-related files (backend languages only)
-    if _DATABASE_PATH_RE.search(path):
-        return "database"
+    # ── JS / TS / Vue / Svelte ────────────────────────────────────────────────
+    if extension in {".tsx", ".jsx", ".vue", ".svelte"}:
+        if _PAGE_PATH_RE.search(path):
+            return "e2e"        # page/screen → Playwright/Cypress
+        return "component"      # component → React Testing Library / Vitest
 
-    # Default: backend (.py, .go, .java, etc.)
-    return "backend"
+    if extension in {".ts", ".js"}:
+        if re.search(r"(\.test\.|\.spec\.|cypress|playwright|puppeteer)", path):
+            return "e2e"
+        if _PAGE_PATH_RE.search(path):
+            return "e2e"
+        if re.search(r"(api[s]?/|routes?/|controller[s]?/|endpoint[s]?/)", path):
+            return "api"
+        return "component"      # generic TS/JS → component test
+
+    # ── Python / Go / Java / Ruby / PHP ──────────────────────────────────────
+    if extension in {".py", ".go", ".java", ".rb", ".php"}:
+        if re.search(r"(test_|_test\.|\.test\.|spec_|_spec\.)", path):
+            return "unit"       # existing test file → reference for new tests
+        if _DATABASE_PATH_RE.search(path):
+            return "database"
+        if re.search(r"(api[s]?/|routes?/|views?/|endpoint[s]?/|controller[s]?/)", path):
+            return "api"
+        if _SERVICE_PATH_RE.search(path):
+            return "integration"
+        # Content fallback: if it imports httpx/requests/aiohttp → integration
+        if re.search(r"(httpx|requests|aiohttp|urllib|fetch)\.", content):
+            return "integration"
+        return "api"            # default for backend files
+
+    return "api"
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -253,21 +319,66 @@ def _filter_relevant_endpoints(
     return relevant if relevant else endpoints[:5]  # Fallback: first 5 endpoints
 
 
+_LAYER_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"/(api[s]?|endpoints?|routes?)/",        re.IGNORECASE), "api"),
+    (re.compile(r"/(controller[s]?)/",                    re.IGNORECASE), "controllers"),
+    (re.compile(r"/(service[s]?|use.?case[s]?)/",         re.IGNORECASE), "services"),
+    (re.compile(r"/(model[s]?|entit|orm|schema)/",        re.IGNORECASE), "models"),
+    (re.compile(r"/(repositor|dao)/",                     re.IGNORECASE), "repositories"),
+    (re.compile(r"/(migration[s]?|seed[s]?|fixture[s]?)/",re.IGNORECASE), "migrations"),
+    (re.compile(r"/(component[s]?)/",                     re.IGNORECASE), "components"),
+    (re.compile(r"/(page[s]?|screen[s]?|view[s]?)/",      re.IGNORECASE), "pages"),
+    (re.compile(r"/(layout[s]?|template[s]?)/",           re.IGNORECASE), "layouts"),
+    (re.compile(r"/(hook[s]?)/",                          re.IGNORECASE), "hooks"),
+    (re.compile(r"/(util[s]?|helper[s]?|lib[s]?)/",       re.IGNORECASE), "utils"),
+    (re.compile(r"/(task[s]?|worker[s]?|job[s]?|queue[s]?)/", re.IGNORECASE), "tasks"),
+    (re.compile(r"/(auth|security|permission[s]?)/",       re.IGNORECASE), "auth"),
+    (re.compile(r"/(config|setting[s]?|conf)/",            re.IGNORECASE), "config"),
+    (re.compile(r"/(test[s]?|spec[s]?)/",                  re.IGNORECASE), "tests"),
+    (re.compile(r"/(middleware[s]?)/",                     re.IGNORECASE), "middleware"),
+    (re.compile(r"/(websocket[s]?|socket[s]?|ws)/",        re.IGNORECASE), "websockets"),
+]
+_MAX_EPS_PER_GROUP = 12   # cap files sent to AI per group prompt
+
+
 def _group_entry_points(
     entry_points: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Group entry points by directory/module to avoid generating repetitive tests."""
+    """Group entry points by architectural layer for diverse, focused test generation.
+
+    Uses path-segment patterns to map files to layers (api, services, models, …).
+    Falls back to the first meaningful directory when no layer matches.
+    Large layers are split into numbered sub-groups so each AI call stays focused.
+    """
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
     for ep in entry_points:
-        path = ep.get("path", "unknown")
-        parts = Path(path).parts
-        # Group by first meaningful directory
-        if len(parts) >= 2:
-            group_key = parts[0] if parts[0] not in ("src", "app", "lib") else "/".join(parts[:2])
+        fwd = "/" + ep.get("path", "").replace("\\", "/")
+        assigned = False
+        for pattern, layer in _LAYER_PATTERNS:
+            if pattern.search(fwd):
+                groups[layer].append(ep)
+                assigned = True
+                break
+        if not assigned:
+            parts = Path(ep.get("path", "")).parts
+            if len(parts) >= 2:
+                key = parts[0] if parts[0] not in ("src", "app", "lib", "backend", "frontend") \
+                      else "/".join(parts[:2])
+            else:
+                key = "root"
+            groups[key].append(ep)
+
+    # Split oversized groups so each AI prompt stays manageable
+    final: dict[str, list[dict[str, Any]]] = {}
+    for layer, eps in groups.items():
+        if len(eps) <= _MAX_EPS_PER_GROUP:
+            final[layer] = eps
         else:
-            group_key = "root"
-        groups[group_key].append(ep)
-    return dict(groups)
+            for chunk_idx, start in enumerate(range(0, len(eps), _MAX_EPS_PER_GROUP)):
+                final[f"{layer}/{chunk_idx + 1}"] = eps[start:start + _MAX_EPS_PER_GROUP]
+
+    return final
 
 
 def _build_rich_prompt(
@@ -362,40 +473,64 @@ def _build_rich_prompt(
 # ── Background scan task ──────────────────────────────────────────────────────
 
 
-def _find_entry_points_from_fs(project_path: str, max_files: int = 500) -> list[dict[str, Any]]:
-    """Walk the project filesystem and identify interesting entry-point files."""
+def _find_entry_points_from_fs(project_path: str, max_files: int = 3000) -> list[dict[str, Any]]:
+    """Walk the project filesystem and collect testable entry-point files.
+
+    Changes vs. old implementation:
+    - max_files raised to 3000 (was 500) so large projects are fully covered.
+    - Content preview raised to 1500 chars (was 800) for better AI context.
+    - Qualification broadened: any file with a named function/class/component
+      qualifies, not just files with route patterns.
+    - Files are sorted by path so all directories get a proportional share
+      before the limit kicks in.
+    """
     root = Path(project_path)
     if not root.exists():
         return []
 
+    # Collect all candidate files first, then sort for deterministic coverage
+    candidates: list[Path] = []
+    for fp in root.rglob("*"):
+        if any(skip in fp.parts for skip in _SKIP_DIRS):
+            continue
+        if fp.is_file() and fp.suffix in _ENTRY_POINT_EXTENSIONS:
+            candidates.append(fp)
+
+    # Sort so files are visited in a predictable, path-ordered way
+    candidates.sort(key=lambda p: str(p))
+
     entry_points: list[dict[str, Any]] = []
     scanned = 0
 
-    for file_path in root.rglob("*"):
+    for file_path in candidates:
         if scanned >= max_files:
             break
-        if any(skip in file_path.parts for skip in _SKIP_DIRS):
-            continue
-        if not file_path.is_file():
-            continue
-        if file_path.suffix not in _ENTRY_POINT_EXTENSIONS:
-            continue
-
         scanned += 1
         try:
             content = file_path.read_text(encoding="utf-8", errors="ignore")
-            is_entry = any(p.search(content) for p in _ROUTE_PATTERNS)
-            if is_entry or "export default" in content or "class " in content:
-                preview = content[:800]
-                entry_points.append({
-                    "path": str(file_path.relative_to(root)),
-                    "content_preview": preview,
-                    "extension": file_path.suffix,
-                    "content_hash": hashlib.md5(preview.encode()).hexdigest(),
-                })
+            # Broad qualification: any pattern match OR generic class/function presence
+            is_entry = (
+                any(p.search(content) for p in _ENTRY_PATTERNS)
+                or "export default" in content
+                or "class " in content
+            )
+            if not is_entry:
+                continue
+
+            preview = content[:1500]
+            entry_points.append({
+                "path": str(file_path.relative_to(root)),
+                "content_preview": preview,
+                "extension": file_path.suffix,
+                "content_hash": hashlib.md5(content.encode()).hexdigest(),
+            })
         except Exception:
             pass
 
+    logger.info(
+        "scan: scanned %d files, found %d entry points (max_files=%d)",
+        scanned, len(entry_points), max_files,
+    )
     return entry_points
 
 
@@ -459,8 +594,10 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
 
             # Resolve effective path: use synced workspace if available
             effective_path = _get_effective_path(job.project_id, project_path)
+            ws_path = str(Path("workspace") / job.project_id)
+            using_workspace = (effective_path == ws_path)
 
-            # Read .env from project directory
+            # Read .env from effective path (workspace or host)
             dotenv_vars = _read_dotenv_from_project(effective_path)
             # Merge with configured env vars (config overrides dotenv)
             pw_config = (config.playwright_config or {}) if config else {}
@@ -477,7 +614,15 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
             await db.commit()
             await _broadcast_scan_progress(job)
 
-            if structure:
+            if using_workspace:
+                # Workspace is synced — scan real files inside the container.
+                # This gives AI full file content, not just structure metadata.
+                logger.info("scan: scanning synced workspace at %r", effective_path)
+                entry_points = _find_entry_points_from_fs(effective_path)
+                logger.info("scan: found %d entry points in workspace", len(entry_points))
+                job.files_found = len(entry_points)
+            elif structure:
+                # No workspace — fall back to pre-discovered structure from Electron
                 entry_points = _find_entry_points_from_structure(structure)
                 job.files_found = structure.get("total_files", len(entry_points))
             else:
@@ -496,8 +641,8 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                         "extension": ".py",
                     })
 
-            # Classify entry points by type (backend / frontend / database)
-            ep_type_counts: dict[str, int] = {"backend": 0, "frontend": 0, "database": 0}
+            # Classify entry points by type (api / e2e / unit / integration / database / component)
+            ep_type_counts: dict[str, int] = defaultdict(int)
             for ep in entry_points:
                 ep["resource_type"] = _classify_entry_point(ep)
                 ep_type_counts[ep["resource_type"]] += 1
@@ -551,15 +696,15 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                 logger.warning("AI provider unavailable for scan: %s", exc)
                 agent = None
 
-            # Group entry points by module
+            # Group entry points by architectural layer
             groups = _group_entry_points(entry_points)
             generated_count = 0
             tests_by_type: dict[str, int] = {"backend": 0, "frontend": 0, "database": 0}
             total_groups = len(groups)
+            _MAX_GROUPS = 30  # was 10
 
             for group_idx, (group_name, group_eps) in enumerate(groups.items()):
-                # Limit to 10 groups to avoid extremely long scans
-                if group_idx >= 10:
+                if group_idx >= _MAX_GROUPS:
                     break
 
                 # Filter relevant OpenAPI endpoints for this group
@@ -573,13 +718,20 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                             relevant_set[key] = rel
                     relevant_endpoints = list(relevant_set.values()) or openapi_endpoints[:5]
 
-                # Determine test type from resource types in group
-                resource_types = {ep.get("resource_type", "backend") for ep in group_eps}
-                if "database" in resource_types:
-                    test_type = "database"
-                else:
-                    extensions = {ep.get("extension", "") for ep in group_eps}
-                    test_type = "api" if ".py" in extensions else "e2e"
+                # Determine test_type from the dominant resource_type in this group.
+                # Priority: database > e2e > component > integration > api > unit
+                resource_types = [ep.get("resource_type", "api") for ep in group_eps]
+                type_priority = ["database", "e2e", "component", "integration", "api", "unit"]
+                type_counts: dict[str, int] = {}
+                for rt in resource_types:
+                    type_counts[rt] = type_counts.get(rt, 0) + 1
+                test_type = max(type_counts, key=lambda t: (type_priority.index(t) if t in type_priority else 99, -type_counts[t]))
+                # Remap internal types to AI-friendly labels
+                test_type = {
+                    "component": "e2e",
+                    "unit": "api",
+                    "integration": "api",
+                }.get(test_type, test_type)
 
                 prompt = _build_rich_prompt(
                     entry_points=group_eps,
@@ -632,12 +784,14 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                     ep_test_type = test_type
                     if ep_data:
                         rt = ep_data.get("resource_type", "")
-                        if rt == "database":
-                            ep_test_type = "database"
-                        elif rt == "frontend":
-                            ep_test_type = "e2e"
-                        elif rt == "backend":
-                            ep_test_type = "api"
+                        ep_test_type = {
+                            "database": "database",
+                            "e2e": "e2e",
+                            "component": "e2e",
+                            "integration": "api",
+                            "unit": "api",
+                            "api": "api",
+                        }.get(rt, test_type)
                     gt = GeneratedTest(
                         scan_job_id=job_id,
                         project_id=job.project_id,

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Callable
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, Response
@@ -104,21 +104,73 @@ def create_application() -> FastAPI:
     else:
         cors_kw["allow_origins"] = origins
 
+    def _is_allowed_origin(origin: str | None) -> bool:
+        if not origin:
+            return False
+        if origin in origins:
+            return True
+        # Always allow localhost/127.0.0.1 so dev and Docker work without env tweaks
+        if "localhost" in origin or "127.0.0.1" in origin:
+            return True
+        if settings.environment == "development" and ("localhost" in origin or "127.0.0.1" in origin):
+            return True
+        return False
+
+    def _cors_headers(origin: str) -> dict[str, str]:
+        return {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "86400",
+        }
+
+    class PreflightCORSMiddleware(BaseHTTPMiddleware):
+        """Respond to OPTIONS preflight with CORS headers so browser never blocks."""
+        async def dispatch(self, request: Request, call_next: Callable) -> Response:
+            if request.method.upper() == "OPTIONS":
+                origin = request.headers.get("origin") or ""
+                allow_origin = origin if _is_allowed_origin(origin) else "http://localhost:5173"
+                return Response(status_code=200, headers=_cors_headers(allow_origin))
+            return await call_next(request)
+
     class EnsureCORSHeadersMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next: Callable) -> Response:
             response = await call_next(request)
             origin = request.headers.get("origin")
-            if origin and not response.headers.get("access-control-allow-origin"):
-                if origin in origins or (
-                    settings.environment == "development"
-                    and ("localhost" in origin or "127.0.0.1" in origin)
-                ):
-                    response.headers["Access-Control-Allow-Origin"] = origin
-                    response.headers["Access-Control-Allow-Credentials"] = "true"
+            if origin and _is_allowed_origin(origin):
+                for k, v in _cors_headers(origin).items():
+                    response.headers[k] = v
             return response
 
+    # Outermost middleware runs last on response — add CORS to every response (including 401 from any layer)
+    class FinalCORSResponseMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next: Callable) -> Response:
+            response = await call_next(request)
+            origin = request.headers.get("origin")
+            if origin and _is_allowed_origin(origin):
+                for k, v in _cors_headers(origin).items():
+                    response.headers[k] = v
+            return response
+
+    # Order: last added runs first on request / last on response. FinalCORS sees every response last.
     app.add_middleware(EnsureCORSHeadersMiddleware)
     app.add_middleware(CORSMiddleware, **cors_kw)
+    app.add_middleware(PreflightCORSMiddleware)
+    app.add_middleware(FinalCORSResponseMiddleware)
+
+    def _add_cors_to_response(response: Response, request: Request) -> None:
+        origin = request.headers.get("origin")
+        if _is_allowed_origin(origin):
+            for k, v in _cors_headers(origin).items():
+                response.headers[k] = v
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException) -> Response:
+        """Ensure 404 and other HTTP errors include CORS headers."""
+        response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        _add_cors_to_response(response, request)
+        return response
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(request: Request, exc: Exception) -> Response:
@@ -128,13 +180,7 @@ def create_application() -> FastAPI:
             status_code=500,
             content={"detail": "Internal server error"},
         )
-        origin = request.headers.get("origin")
-        if origin and (
-            origin in origins
-            or (settings.environment == "development" and ("localhost" in origin or "127.0.0.1" in origin))
-        ):
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
+        _add_cors_to_response(response, request)
         return response
 
     # Health check endpoint
@@ -218,4 +264,68 @@ def create_application() -> FastAPI:
     return app
 
 
-app = create_application()
+def _get_origin_from_scope(scope: dict) -> str | None:
+    if scope.get("type") != "http":
+        return None
+    for (key, value) in scope.get("headers", []):
+        if key.lower() == b"origin":
+            return value.decode("utf-8", errors="replace")
+    return None
+
+
+def _is_allowed_origin_cors(origin: str | None) -> bool:
+    if not origin:
+        return False
+    if "localhost" in origin or "127.0.0.1" in origin:
+        return True
+    origins = list(settings.cors_origins)
+    if origin in origins:
+        return True
+    return False
+
+
+def _cors_headers_list(origin: str) -> list[tuple[bytes, bytes]]:
+    return [
+        (b"access-control-allow-origin", origin.encode()),
+        (b"access-control-allow-credentials", b"true"),
+        (b"access-control-allow-methods", b"GET, POST, PUT, PATCH, DELETE, OPTIONS"),
+        (b"access-control-allow-headers", b"*"),
+        (b"access-control-max-age", b"86400"),
+    ]
+
+
+class ASGICORSWrapper:
+    """Outermost ASGI wrapper: handle OPTIONS preflight and add CORS to every response."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        origin = _get_origin_from_scope(scope)
+        allowed = _is_allowed_origin_cors(origin)
+        allow_origin = (origin if allowed else None) or "http://localhost:5173"
+
+        if scope.get("method", "").upper() == "OPTIONS":
+            headers = _cors_headers_list(allow_origin)
+            await send({"type": "http.response.start", "status": 200, "headers": headers})
+            await send({"type": "http.response.body", "body": b""})
+            return
+
+        response_origin = origin if _is_allowed_origin_cors(origin) else None
+
+        async def send_with_cors(message: dict) -> None:
+            if message["type"] == "http.response.start" and response_origin:
+                headers = list(message.get("headers", []))
+                headers = [(k, v) for k, v in headers if k.lower() != b"access-control-allow-origin"]
+                headers.extend(_cors_headers_list(response_origin))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_cors)
+
+
+app = ASGICORSWrapper(create_application())

@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -33,11 +34,12 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-# ── Shared virtualenv ─────────────────────────────────────────────────────────
-# A single venv shared by all projects, stored inside the workspace volume.
-# Each project's requirements are installed cumulatively; re-installed only
-# when the project's requirements hash changes.
-_SHARED_VENV = Path("workspace") / ".shared_venv"
+# ── Per-project virtualenv ────────────────────────────────────────────────────
+# Each synced workspace gets its own isolated venv at:
+#   workspace/{project_id}/.testforge_venv/
+# The venv is created on the first test run and rebuilt when requirements change.
+# All paths are made ABSOLUTE before use so that subprocess with a different
+# cwd does not mis-resolve relative executables.
 
 # ── Process registry ──────────────────────────────────────────────────────────
 # Maps run_id → subprocess.Process for cancellation and concurrency control
@@ -52,6 +54,65 @@ async def _broadcast_run(run_id: str, data: dict[str, Any]) -> None:
             await ws_manager.broadcast("run", run_id, data)
         except Exception:
             pass
+
+
+async def _stream_install_cmd(
+    cmd: list[str],
+    run_id: str | None,
+    label: str,
+    timeout: float = 300.0,
+) -> tuple[bool, str]:
+    """Run an install command, streaming each output line as a WebSocket log message.
+
+    Returns (success, combined_stderr_text).
+    """
+    if run_id:
+        await _broadcast_run(run_id, {"log": f"[install] {label}"})
+    logger.info("engine: %s", label)
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+
+    async def _drain(stream: asyncio.StreamReader, buf: list[str]) -> None:
+        async for raw in stream:
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            if line:
+                buf.append(line)
+                if run_id:
+                    await _broadcast_run(run_id, {"log": f"  {line}"})
+
+    t_out = asyncio.create_task(_drain(proc.stdout, stdout_lines))  # type: ignore[arg-type]
+    t_err = asyncio.create_task(_drain(proc.stderr, stderr_lines))  # type: ignore[arg-type]
+    try:
+        await asyncio.wait_for(asyncio.gather(t_out, t_err), timeout=timeout)
+    except asyncio.TimeoutError:
+        t_out.cancel()
+        t_err.cancel()
+        proc.kill()
+        if run_id:
+            await _broadcast_run(run_id, {"log": "[install] ⚠ Timed out after 5 minutes"})
+        return False, "Timed out"
+
+    await proc.wait()
+    returncode = proc.returncode or 0
+    success = returncode == 0
+
+    if not success:
+        err_tail = "\n".join((stdout_lines + stderr_lines)[-5:])
+        if run_id:
+            await _broadcast_run(run_id, {"log": f"[install] ⚠ Exited {returncode}: {err_tail[:300]}"})
+        logger.warning("engine: install exited %s: %s", returncode, "\n".join(stderr_lines)[:300])
+    else:
+        if run_id:
+            await _broadcast_run(run_id, {"log": "[install] ✓ Done"})
+
+    return success, "\n".join(stderr_lines)
 
 
 def cancel_run(run_id: str) -> bool:
@@ -86,11 +147,7 @@ def _get_effective_path(project_id: str, project_path: str) -> str:
 
 
 def _req_hash(workspace_path: Path) -> str:
-    """MD5 of all requirements files in *workspace_path*.
-
-    Used to detect when a project's dependencies have changed so the shared
-    venv can be updated without reinstalling unchanged projects.
-    """
+    """MD5 fingerprint of all requirements files found in *workspace_path*."""
     h = hashlib.md5()
     for fname in (
         "requirements.txt",
@@ -100,118 +157,220 @@ def _req_hash(workspace_path: Path) -> str:
         "setup.cfg",
         "setup.py",
     ):
-        f = workspace_path / fname
-        if f.exists():
-            try:
-                h.update(fname.encode())
-                h.update(f.read_bytes())
-            except OSError:
-                pass
+        for search_dir in [workspace_path, workspace_path / "backend", workspace_path / "api"]:
+            f = search_dir / fname
+            if f.exists():
+                try:
+                    h.update(str(f.relative_to(workspace_path)).encode())
+                    h.update(f.read_bytes())
+                except OSError:
+                    pass
     return h.hexdigest()
 
 
-async def _ensure_shared_venv() -> Path | None:
-    """Create the shared virtualenv if it does not exist yet.
+# Import names that map to a different PyPI package name
+_IMPORT_TO_PKG: dict[str, str] = {
+    "dotenv": "python-dotenv",
+    "pil": "Pillow",
+    "yaml": "PyYAML",
+    "cv2": "opencv-python",
+    "sklearn": "scikit-learn",
+    "bs4": "beautifulsoup4",
+    "dateutil": "python-dateutil",
+    "jose": "python-jose",
+    "jwt": "PyJWT",
+    "magic": "python-magic",
+    "attr": "attrs",
+}
 
-    Returns the *bin/* directory of the venv (e.g. ``workspace/.shared_venv/bin``),
-    or *None* if creation failed.
+# Top-level names that are stdlib, pytest internals, or local app packages
+_STDLIB_NAMES: frozenset[str] = frozenset({
+    "os", "sys", "re", "io", "json", "time", "datetime", "pathlib", "typing",
+    "collections", "itertools", "functools", "math", "random", "string", "uuid",
+    "asyncio", "threading", "subprocess", "shutil", "tempfile", "hashlib",
+    "base64", "urllib", "http", "email", "abc", "copy", "enum", "dataclasses",
+    "logging", "warnings", "traceback", "contextlib", "unittest", "decimal",
+    "struct", "socket", "signal", "platform", "inspect", "importlib", "types",
+    "weakref", "gc", "atexit", "builtins", "operator", "stat", "fnmatch",
+    # test framework (installed separately as essentials)
+    "pytest", "anyio", "pytest_asyncio",
+    # local app packages (not installable, code is in workspace)
+    "app", "tests", "backend", "api", "conftest", "__future__",
+})
+
+_SKIP_VENV_DIRS: frozenset[str] = frozenset({".testforge_venv", "node_modules", ".git", "__pycache__"})
+
+
+def _collect_test_dependencies(workspace_abs: Path) -> list[str]:
+    """Return requirement specs from the project's requirements files, skipping
+    known-heavy packages (torch, tensorflow, opencv, etc.) that tests almost never
+    need and that would take many minutes to download.
+
+    This is a 'full minus heavy' strategy: install everything from requirements.txt
+    except the packages that are too large or require GPU/system libs.
     """
-    python_bin = _SHARED_VENV / "bin" / "python"
-    if python_bin.exists():
-        return _SHARED_VENV / "bin"
+    # Normalized package names that are too large/slow to install in a test venv.
+    # These require GPU drivers, system libs, or take >5 min to download.
+    _HEAVY: frozenset[str] = frozenset({
+        "torch", "torchvision", "torchaudio", "torchtext", "torch_geometric",
+        "tensorflow", "tensorflow_cpu", "tensorflow_gpu", "tf_keras",
+        "keras", "jax", "flax", "trax",
+        "scikit_learn", "scipy", "statsmodels",
+        "opencv_python", "opencv_python_headless", "opencv_contrib_python",
+        "matplotlib", "seaborn", "plotly", "bokeh", "altair",
+        "transformers", "diffusers", "accelerate", "peft", "trl", "bitsandbytes",
+        "xgboost", "lightgbm", "catboost",
+        "spacy", "nltk", "gensim", "flair",
+        "librosa", "soundfile", "audioread", "pyaudio", "pydub", "noisereduce",
+        "numba", "cupy", "cupy_cuda", "triton",
+        "sentence_transformers", "faiss_cpu", "faiss_gpu", "chromadb",
+        "llama_cpp_python", "ctransformers",
+        "paddle", "paddlepaddle",
+        "mmcv", "mmdet", "mmsegmentation",
+        "detectron2",
+    })
 
-    _SHARED_VENV.mkdir(parents=True, exist_ok=True)
-    logger.info("engine: creating shared venv at %s", _SHARED_VENV)
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "venv", str(_SHARED_VENV),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    req_name_re = re.compile(r"^([A-Za-z0-9_\-\.]+)")
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for fname in ("requirements.txt", "requirements-test.txt", "requirements-dev.txt"):
+        for search_dir in [workspace_abs, workspace_abs / "backend", workspace_abs / "api"]:
+            req_f = search_dir / fname
+            if not req_f.exists():
+                continue
+            try:
+                for line in req_f.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith(("#", "-r ", "-c ", "git+", "http", "--")):
+                        continue
+                    m = req_name_re.match(line)
+                    if not m:
+                        continue
+                    norm = m.group(1).lower().replace("-", "_").replace(".", "_")
+                    if norm in seen or norm in _HEAVY:
+                        continue
+                    seen.add(norm)
+                    result.append(line.split("#")[0].strip())  # strip inline comments
+            except OSError:
+                pass
+
+    logger.info(
+        "engine: collected %d requirement specs (excluded %d heavy packages)",
+        len(result),
+        len([n for n in seen if n in _HEAVY]),
     )
-    _, err = await asyncio.wait_for(proc.communicate(), timeout=60)
-    if proc.returncode != 0:
-        logger.warning("engine: failed to create shared venv: %s", err.decode()[:300])
-        return None
-
-    # Pre-install pytest-json-report so TestForge's --json-report flag always works.
-    pip_bin = _SHARED_VENV / "bin" / "pip"
-    pre_proc = await asyncio.create_subprocess_exec(
-        str(pip_bin), "install", "pytest-json-report", "-q",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await asyncio.wait_for(pre_proc.communicate(), timeout=120)
-
-    logger.info("engine: shared venv created at %s", _SHARED_VENV)
-    return _SHARED_VENV / "bin"
+    return result
 
 
-async def _install_project_deps(
-    project_id: str, workspace_path: Path, venv_bin: Path
-) -> None:
-    """Install (or skip if unchanged) project requirements into the shared venv.
+async def _ensure_project_venv(
+    workspace_path: Path,
+    run_id: str | None = None,
+) -> Path | None:
+    """Create or update a per-project virtualenv inside the synced workspace.
 
-    Tracks installed state with a per-project hash file so pip is only invoked
-    when requirements actually change.
+    Uses a **smart install strategy** to avoid installing the entire
+    requirements.txt (which may contain heavy ML packages like torch that
+    have nothing to do with the test suite).
+
+    Phase 1 — always install pytest essentials (fast, ~5–10s).
+    Phase 2 — install project requirements minus known-heavy packages.
+
+    All returned paths are absolute so that asyncio.create_subprocess_exec
+    resolves the executable correctly regardless of the subprocess cwd.
+
+    Install progress is streamed via WebSocket when *run_id* is provided.
     """
-    req_file = workspace_path / "requirements.txt"
-    req_test = workspace_path / "requirements-test.txt"
-    pyproject = workspace_path / "pyproject.toml"
+    workspace_abs = workspace_path.resolve()
+    venv_dir = workspace_abs / ".testforge_venv"
+    python_bin = venv_dir / "bin" / "python"
+    pip_bin = venv_dir / "bin" / "pip"
+    hash_file = venv_dir / ".req_hash"
 
-    has_reqs = req_file.exists() or req_test.exists() or pyproject.exists()
-    if not has_reqs:
-        logger.debug("engine: no requirements found in %s — skipping dep install", workspace_path)
-        return
+    current_hash = _req_hash(workspace_abs)
 
-    current_hash = _req_hash(workspace_path)
-    hash_file = _SHARED_VENV / f".{project_id}.hash"
-
-    if hash_file.exists():
+    # Skip if venv is up to date
+    if python_bin.exists() and hash_file.exists():
         try:
             if hash_file.read_text().strip() == current_hash:
-                logger.info("engine: shared venv already up to date for project %s", project_id)
-                return
+                logger.info("engine: project venv up to date at %s", venv_dir)
+                if run_id:
+                    await _broadcast_run(run_id, {"log": "[env] Project environment is up to date — skipping install"})
+                return venv_dir / "bin"
         except OSError:
             pass
 
-    pip_bin = venv_bin / "pip"
-    install_cmds: list[list[str]] = []
+    # Create the virtualenv
+    if run_id:
+        await _broadcast_run(run_id, {"log": "[env] Creating isolated Python environment…"})
 
-    if req_file.exists():
-        install_cmds.append([str(pip_bin), "install", "-r", str(req_file), "-q"])
-    if req_test.exists():
-        install_cmds.append([str(pip_bin), "install", "-r", str(req_test), "-q"])
-    if pyproject.exists() and not req_file.exists():
-        install_cmds.append([str(pip_bin), "install", "-e", str(workspace_path), "-q"])
+    venv_ok, _ = await _stream_install_cmd(
+        [sys.executable, "-m", "venv", str(venv_dir)],
+        run_id,
+        "python -m venv .testforge_venv",
+        timeout=120.0,
+    )
+    if not venv_ok:
+        return None
 
-    # Ensure pytest-json-report is always present (may have been added post-venv-creation)
-    install_cmds.append([str(pip_bin), "install", "pytest-json-report", "-q"])
+    install_ok = True
+    uv_bin = venv_dir / "bin" / "uv"
 
-    for cmd in install_cmds:
-        logger.info("engine: %s", " ".join(cmd[:5]))
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+    # Phase 1: pytest essentials — always installed, very fast (~5–10s).
+    # httpx is included because starlette.testclient (used by FastAPI tests) requires it.
+    essentials = [
+        "pytest", "pytest-asyncio", "pytest-json-report", "anyio[asyncio]", "httpx",
+        "uv",  # install uv so Phase 2 can use it (10-100x faster than pip)
+    ]
+    phase1_ok, _ = await _stream_install_cmd(
+        [str(pip_bin), "install"] + essentials,
+        run_id,
+        f"Phase 1 — test essentials: {', '.join(essentials[:4])}…",
+        timeout=300.0,
+    )
+    if not phase1_ok:
+        install_ok = False
+
+    # Phase 2: project requirements minus known-heavy packages.
+    # If uv is available after Phase 1, use it for dramatic speed improvement.
+    test_deps = _collect_test_dependencies(workspace_abs)
+    if test_deps:
+        if uv_bin.exists():
+            phase2_cmd = [
+                str(uv_bin), "pip", "install",
+                "--python", str(python_bin),
+            ] + test_deps
+        else:
+            phase2_cmd = [str(pip_bin), "install"] + test_deps
+
+        phase2_ok, _ = await _stream_install_cmd(
+            phase2_cmd,
+            run_id,
+            f"Phase 2 — {len(test_deps)} project deps via {'uv' if uv_bin.exists() else 'pip'}",
+            timeout=300.0,
         )
+        if not phase2_ok:
+            install_ok = False
+    elif run_id:
+        await _broadcast_run(run_id, {"log": "[env] No project requirements found — skipping Phase 2"})
+
+    # Only stamp the hash when all installs succeeded.
+    # A missing hash forces a retry on the next run.
+    if install_ok:
         try:
-            _, err = await asyncio.wait_for(proc.communicate(), timeout=600)  # 10 min
-        except asyncio.TimeoutError:
-            proc.kill()
-            logger.warning("engine: pip install timed out for project %s", project_id)
-            return
-        if proc.returncode not in (0, None):
-            logger.warning(
-                "engine: pip install returned %s for project %s: %s",
-                proc.returncode, project_id, err.decode()[:500],
-            )
-            # Continue — a partial install is better than nothing
+            hash_file.write_text(current_hash)
+        except OSError:
+            pass
+    else:
+        logger.warning(
+            "engine: dep install incomplete for %s — hash NOT stamped, will retry next run",
+            venv_dir,
+        )
 
-    try:
-        hash_file.write_text(current_hash)
-    except OSError:
-        pass
-
-    logger.info("engine: deps installed for project %s in shared venv", project_id)
+    logger.info("engine: project venv ready at %s (complete=%s)", venv_dir, install_ok)
+    if run_id:
+        await _broadcast_run(run_id, {"log": f"[env] Environment ready (complete={install_ok})"})
+    return venv_dir / "bin"
 
 
 def _translate_path(project_path: str) -> str:
@@ -293,13 +452,20 @@ def _detect_runner(
             f"Cannot read project directory (network path or permissions?): {project_path}. {e!s}"
         ) from e
 
-    # Playwright (TypeScript / JavaScript) — root or common subdirs (e2e, tests, tests/e2e)
+    # Playwright (TypeScript / JavaScript) — root and common subdirs (including monorepo layouts)
     playwright_configs = ("playwright.config.ts", "playwright.config.js", "playwright.config.mjs")
     search_dirs: list[Path] = [base]
-    for sub in ("e2e", "tests", "tests/e2e", "playwright"):
+    for sub in ("e2e", "tests", "tests/e2e", "playwright", "e2e/tests", "frontend", "app", "apps/web", "packages/e2e"):
         d = base / sub
         if d.is_dir():
             search_dirs.append(d)
+    # One more level: e.g. apps/web/e2e, packages/e2e/tests
+    for sub in list(search_dirs):
+        if sub != base:
+            for sub2 in ("e2e", "tests", "playwright"):
+                d2 = sub / sub2
+                if d2.is_dir():
+                    search_dirs.append(d2)
     for root in search_dirs:
         for cfg in playwright_configs:
             if (root / cfg).exists():
@@ -314,23 +480,75 @@ def _detect_runner(
                 if browser and browser in ("chromium", "firefox", "webkit"):
                     cmd += [f"--project={browser}"]
                 return "frontend", cmd, str(root)
+    # Glob for playwright.config.* anywhere under base (max depth 4 for monorepos)
+    try:
+        for path in base.rglob("playwright.config.*"):
+            if path.suffix in (".ts", ".js", ".mjs") and path.is_file():
+                try:
+                    if len(path.relative_to(base).parts) > 4:
+                        continue
+                except ValueError:
+                    continue
+                root = path.parent
+                npx = shutil.which("npx") or "npx"
+                cmd = [npx, "playwright", "test", "--reporter=json"]
+                if parallel_workers > 1:
+                    cmd += [f"--workers={parallel_workers}"]
+                if retry_count > 0:
+                    cmd += [f"--retries={retry_count}"]
+                if test_timeout != 30000:
+                    cmd += [f"--timeout={test_timeout}"]
+                if browser and browser in ("chromium", "firefox", "webkit"):
+                    cmd += [f"--project={browser}"]
+                return "frontend", cmd, str(root)
+    except OSError:
+        pass
 
-    # pytest
-    for cfg in ("pyproject.toml", "setup.cfg", "pytest.ini", "conftest.py"):
-        if (base / cfg).exists():
-            # Prefer the shared venv's pytest (has project deps + pytest-json-report).
-            if venv_bin and (venv_bin / "pytest").exists():
-                pytest_bin = str(venv_bin / "pytest")
-            else:
-                pytest_bin = shutil.which("pytest") or "pytest"
-            cmd = [pytest_bin, "--json-report", "--json-report-file=-", "-q"]
-            if parallel_workers > 1:
-                cmd += ["-n", str(parallel_workers)]
-            if retry_count > 0:
-                cmd += [f"--count={retry_count}"]
-            if test_timeout != 30000:
-                cmd += [f"--timeout={test_timeout // 1000}"]
-            return "backend", cmd, str(base)
+    # pytest — search root first, then common monorepo backend subdirs.
+    # Also treat requirements.txt as a fallback indicator (project may lack explicit
+    # config but still be runnable with pytest after workspace scaffolding).
+    _pytest_cfgs = (
+        "pyproject.toml", "setup.cfg", "pytest.ini", "setup.py",
+        "conftest.py", "requirements.txt",
+    )
+    _pytest_search: list[Path] = [base]
+    for _sub in ("backend", "api", "server", "src", "app", "lib", "tests"):
+        _d = base / _sub
+        if _d.is_dir():
+            _pytest_search.append(_d)
+
+    for _pytest_dir in _pytest_search:
+        for cfg in _pytest_cfgs:
+            if (_pytest_dir / cfg).exists():
+                # Prefer the project venv's pytest (absolute path — critical!).
+                # Using a relative path here would be resolved from the subprocess cwd,
+                # not the backend cwd, causing [Errno 2] No such file or directory.
+                if venv_bin is not None:
+                    venv_pytest = (venv_bin / "pytest").resolve()
+                    if venv_pytest.exists():
+                        pytest_bin = str(venv_pytest)
+                    else:
+                        # venv exists but pytest not yet installed — fall back
+                        pytest_bin = shutil.which("pytest") or sys.executable + " -m pytest"
+                else:
+                    pytest_bin = shutil.which("pytest") or sys.executable + " -m pytest"
+                # If pytest_bin contains a space (the "-m pytest" fallback), split it
+                if " " in pytest_bin:
+                    cmd = pytest_bin.split() + ["--json-report", "--json-report-file=-", "-q"]
+                else:
+                    cmd = [pytest_bin, "--json-report", "--json-report-file=-", "-q"]
+                if parallel_workers > 1:
+                    cmd += ["-n", str(parallel_workers)]
+                if retry_count > 0:
+                    cmd += [f"--count={retry_count}"]
+                if test_timeout != 30000:
+                    cmd += [f"--timeout={test_timeout // 1000}"]
+                logger.info(
+                    "engine: detected pytest config %s in %s",
+                    cfg,
+                    _pytest_dir.relative_to(base) if _pytest_dir != base else "(root)",
+                )
+                return "backend", cmd, str(_pytest_dir)
 
     # package.json test script
     pkg = base / "package.json"
@@ -344,11 +562,17 @@ def _detect_runner(
         except Exception:
             pass
 
+    try:
+        top = sorted(base.iterdir(), key=lambda p: p.name)[:15]
+        found = ", ".join(p.name for p in top) or "(empty)"
+    except Exception:
+        found = "(could not list)"
     raise RuntimeError(
         f"Could not detect test runner at {project_path}. "
         "Supported: Playwright (playwright.config.* in root or e2e/tests), "
         "pytest (pyproject.toml/conftest.py), or npm test script. "
-        "If this is a network path, ensure the backend can read the directory."
+        f"Top-level contents: {found}. "
+        "If using a synced workspace, run Sync Now and ensure the project has one of the above."
     )
 
 
@@ -460,6 +684,58 @@ def _parse_pytest_output(raw: str) -> list[dict[str, Any]]:
 # ── Main engine ───────────────────────────────────────────────────────────────
 
 
+async def _try_get_auth_token(backend_url: str, email: str, password: str) -> str | None:
+    """Attempt to authenticate with the project's backend and return a JWT token.
+
+    Tries the most common login endpoint patterns used by FastAPI / Django / Rails
+    projects. Returns None if authentication fails or the backend is unreachable.
+    """
+    try:
+        import httpx
+    except ImportError:
+        return None
+
+    # (endpoint, json_body) pairs — tried in order
+    candidates = [
+        ("/api/v1/auth/login",  {"email": email, "password": password}),
+        ("/api/v1/auth/token",  {"username": email, "password": password}),
+        ("/api/auth/login",     {"email": email, "password": password}),
+        ("/api/auth/token",     {"username": email, "password": password}),
+        ("/auth/login",         {"email": email, "password": password}),
+        ("/api/token",          {"username": email, "password": password}),
+    ]
+
+    base = backend_url.rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            for path, body in candidates:
+                try:
+                    resp = await client.post(f"{base}{path}", json=body)
+                except Exception:
+                    continue
+                if resp.status_code not in (200, 201):
+                    continue
+                try:
+                    data = resp.json()
+                except Exception:
+                    continue
+                # Handle common token structures
+                token = (
+                    data.get("access_token")
+                    or data.get("token")
+                    or data.get("accessToken")
+                    or (data.get("data") or {}).get("access_token")
+                    or (data.get("tokens") or {}).get("access")
+                )
+                if token:
+                    logger.info("engine: auth token obtained from %s%s", base, path)
+                    return str(token)
+    except Exception as exc:
+        logger.debug("engine: _try_get_auth_token failed: %s", exc)
+
+    return None
+
+
 async def run_tests_for_project(project_id: str, run_id: str) -> None:
     """Background task: execute tests, persist results, update run status."""
     async with async_session_factory() as db:
@@ -488,15 +764,67 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
         if isinstance(ev, dict):
             env_vars = {str(k): str(v) for k, v in ev.items()}
 
+    # ── Inject project credentials + auth token ───────────────────────────────
+    # Projects often require authentication (e.g. Aurora Language Center).
+    # Inject credentials as env vars so test suites can use them directly,
+    # and try to obtain a JWT token via the project's login endpoint.
+    if config:
+        from app.core.security.encryption import decrypt_value
+        email = config.test_login_email or ""
+        password = ""
+        if config.test_login_password:
+            try:
+                password = decrypt_value(config.test_login_password)
+            except Exception:
+                password = config.test_login_password  # use as-is if not encrypted
+
+        if email and "TEST_LOGIN_EMAIL" not in env_vars:
+            env_vars["TEST_LOGIN_EMAIL"] = email
+        if password and "TEST_LOGIN_PASSWORD" not in env_vars:
+            env_vars["TEST_LOGIN_PASSWORD"] = password
+
+        backend_url = config.backend_url or ""
+        if backend_url:
+            if "BACKEND_URL" not in env_vars:
+                env_vars["BACKEND_URL"] = backend_url
+            if "API_BASE_URL" not in env_vars:
+                env_vars["API_BASE_URL"] = backend_url
+
+        if config.frontend_url and "FRONTEND_URL" not in env_vars:
+            env_vars["FRONTEND_URL"] = config.frontend_url
+
+        # Try to obtain a JWT token so tests don't need to log in themselves
+        if email and password and backend_url and "TEST_AUTH_TOKEN" not in env_vars:
+            token = await _try_get_auth_token(backend_url, email, password)
+            if token:
+                env_vars["TEST_AUTH_TOKEN"] = token
+                env_vars["ACCESS_TOKEN"] = token
+                env_vars["AUTHORIZATION"] = f"Bearer {token}"
+                logger.info("engine: injected auth token for project %s", project_id)
+
     project_path = _get_effective_path(str(project.id), project.path)
 
-    # ── Shared venv + workspace env vars (only when workspace is synced) ──────
+    # ── Mark run as RUNNING early so install logs appear in the frontend ──────
+    run_result = await db.execute(select(TestRun).where(TestRun.id == run_id))
+    test_run: TestRun | None = run_result.scalar_one_or_none()
+    if not test_run:
+        logger.error("engine: run %s not found", run_id)
+        return
+
+    test_run.status = TestRunStatus.RUNNING
+    test_run.started_at = started
+    await db.commit()
+    await _broadcast_run(run_id, {"status": "running", "progress": 0})
+
+    # ── Per-project venv + workspace env vars (only when workspace is synced) ──
     venv_bin: Path | None = None
-    ws_path = Path("workspace") / str(project.id)
-    if project_path == str(ws_path):
-        # 1. Auto-load env vars from .env / .env.local in the workspace.
-        #    These are merged UNDER the manually configured env_vars so that
-        #    explicit project settings always take precedence.
+    # Use absolute path for all workspace operations to avoid cwd-relative issues
+    ws_path = (Path("workspace") / str(project.id)).resolve()
+    is_workspace = project_path == str(ws_path) or project_path == str(Path("workspace") / str(project.id))
+
+    if is_workspace:
+        # 1. Auto-load .env vars from the synced workspace.
+        #    Explicit project config always takes precedence (don't override).
         for dotenv_name in (".env", ".env.local", ".env.test"):
             dotenv_file = ws_path / dotenv_name
             if dotenv_file.exists():
@@ -508,31 +836,18 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
                         key, _, val = line.partition("=")
                         key = key.strip()
                         val = val.strip().strip("'\"")
-                        if key and key not in env_vars:  # don't override explicit config
+                        if key and key not in env_vars:
                             env_vars[key] = val
                     logger.info("engine: loaded env from %s", dotenv_file)
                 except OSError:
                     pass
 
-        # 2. Install project dependencies into the shared venv.
+        # 2. Create/update per-project isolated venv with absolute paths.
+        #    Pass run_id so install output streams to the Test Logs panel.
         try:
-            venv_bin = await _ensure_shared_venv()
-            if venv_bin:
-                await _install_project_deps(str(project.id), ws_path, venv_bin)
+            venv_bin = await _ensure_project_venv(ws_path, run_id)
         except Exception as exc:
             logger.warning("engine: venv setup failed (will use system python): %s", exc)
-
-    # ── Mark run as RUNNING ───────────────────────────────────────────────────
-    run_result = await db.execute(select(TestRun).where(TestRun.id == run_id))
-    test_run: TestRun | None = run_result.scalar_one_or_none()
-    if not test_run:
-        logger.error("engine: run %s not found", run_id)
-        return
-
-    test_run.status = TestRunStatus.RUNNING
-    test_run.started_at = started
-    await db.commit()
-    await _broadcast_run(run_id, {"status": "running", "progress": 0})
 
     # ── Detect runner ─────────────────────────────────────────────────────────
     try:

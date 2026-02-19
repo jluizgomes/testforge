@@ -30,5 +30,12 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // TestForge Docker exposes backend on 8001 (8001:8000)
+    proxy: {
+      '/api': { target: 'http://localhost:8001', changeOrigin: true },
+      '/health': { target: 'http://localhost:8001', changeOrigin: true },
+      '/docs': { target: 'http://localhost:8001', changeOrigin: true },
+      '/openapi.json': { target: 'http://localhost:8001', changeOrigin: true },
+    },
   },
 })

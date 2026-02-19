@@ -100,7 +100,7 @@ export function useWebSocket<T>({
     }
 
     // Build WS URL from backend URL
-    const baseUrl = useAppStore.getState().backendUrl || 'http://localhost:8000'
+    const baseUrl = useAppStore.getState().backendUrl || 'http://localhost:8001'
     const wsUrl = baseUrl
       .replace(/^http:/, 'ws:')
       .replace(/^https:/, 'wss:')

@@ -54,7 +54,7 @@ services:
       DEBUG: "true"
       LOG_LEVEL: INFO
     ports:
-      - "8000:8000"
+      - "8001:8000"
     networks:
       - app_net
     depends_on:
@@ -66,7 +66,7 @@ services:
       - ./backend:/app
       - workspace_data:/app/workspace
       - ${PROJECTS_PATH:-.}:${CONTAINER_WORKSPACE:-/workspace}:ro
-    command: ["./entrypoint.sh", "--reload"]
+    command: ["./entrypoint.sh", "--reload", "--reload-dir", "app"]
 
 networks:
   app_net:

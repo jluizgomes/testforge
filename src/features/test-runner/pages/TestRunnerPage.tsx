@@ -166,6 +166,11 @@ export function TestRunnerPage() {
 
   const handleRunProgress = useCallback(
     async (data: Record<string, unknown>) => {
+      // Stream install / env-setup logs from backend
+      if (data.log) {
+        addLog('info', data.log as string)
+      }
+
       const status = data.status as string | undefined
 
       // Fetch full results from HTTP for both WS and polling
@@ -259,7 +264,7 @@ export function TestRunnerPage() {
         const ws = await apiClient.getWorkspaceStatus(activeProjectId)
         if (!ws.synced) {
           addLog('info', 'Syncing project files to container…')
-          const _backendUrl = useAppStore.getState().backendUrl || 'http://localhost:8000'
+          const _backendUrl = useAppStore.getState().backendUrl || 'http://localhost:8001'
           const syncResult = await window.electronAPI.file.syncProject(
             activeProject.path,
             activeProjectId,
@@ -313,7 +318,7 @@ export function TestRunnerPage() {
     (r.metadata?.network_requests ?? []).map((req) => ({ ...req, test_name: r.test_name }))
   )
 
-  const backendUrl = useAppStore.getState().backendUrl || 'http://localhost:8000'
+  const backendUrl = useAppStore.getState().backendUrl || 'http://localhost:8001'
 
   const screenshotUrl = (path: string) => {
     const filename = path.split('/').pop() ?? path

@@ -281,9 +281,10 @@ function setupIpcHandlers() {
         if (!ignore) ignore = (await import('ignore')).default
 
         const DEFAULT_IGNORES = [
-          'node_modules', '.git', '.github', '.venv', 'venv', 'dist', 'build',
-          '.next', '__pycache__', '*.pyc', '.DS_Store', 'coverage', '*.lock',
-          '*.log', '*.min.js', '*.map',
+          'node_modules', '.git', '.github', '.claude', '.cursor', '.venv', 'venv', 'dist', 'build',
+          '.next', '__pycache__', '.pytest_cache', '*.pyc', '.DS_Store', 'coverage', '*.lock',
+          '*.log', '*.min.js', '*.map', 'docs',
+          '.env.example', '.claudeignore',
         ]
 
         // Build ignore filter
@@ -299,8 +300,8 @@ function setupIpcHandlers() {
         }
 
         const SKIP_DIRS = new Set([
-          'node_modules', '.git', '__pycache__', '.venv', 'venv',
-          'dist', 'build', '.next', 'coverage',
+          'node_modules', '.git', '.github', '.claude', '.cursor', '__pycache__', '.pytest_cache',
+          '.venv', 'venv', 'dist', 'build', '.next', 'coverage', 'docs',
         ])
         const MAX_FILE_SIZE = 512 * 1024 // 500 KB — skip likely binaries
         const MAX_DEPTH = 8
@@ -384,7 +385,7 @@ function setupIpcHandlers() {
       try {
         if (!ignore) ignore = (await import('ignore')).default
         const ig = ignore()
-        ig.add(['node_modules', '.git', '__pycache__', '.venv', 'venv', 'dist', 'build', '.next'])
+        ig.add(['node_modules', '.git', '.github', '.claude', '.cursor', '__pycache__', '.pytest_cache', '.venv', 'venv', 'dist', 'build', '.next', 'docs', '.env.example', '.claudeignore'])
         for (const name of ['.gitignore']) {
           const p = path.join(projectPath, name)
           if (fs.existsSync(p)) {
@@ -440,7 +441,7 @@ function _startWatcher(
         try {
           const data = fs.readFileSync(full)
           const content_b64 = data.toString('base64')
-          await fetch(
+          const putResp = await fetch(
             `${backendUrl}/api/v1/projects/${projectId}/workspace/files`,
             {
               method: 'PUT',
@@ -448,6 +449,16 @@ function _startWatcher(
               body: JSON.stringify({ path: rel, content_b64 }),
             }
           )
+          if (!putResp.ok) {
+            await fetch(
+              `${backendUrl}/api/v1/projects/${projectId}/workspace/files`,
+              {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: rel }),
+              }
+            )
+          }
         } catch { /* best-effort */ }
       } else {
         try {
