@@ -44,7 +44,19 @@ _SKIP_DIRS = {
     "dist", "build", ".next", ".testforge_venv",
     ".pytest_cache", "htmlcov", ".cache", "__mocks__",
     "coverage", ".nyc_output", "storybook-static",
+    # Migration/seed directories — these define schema, not business logic.
+    # Testing migration files themselves is not meaningful; database tests
+    # should target models, repositories, and endpoints instead.
+    "migrations", "alembic", "versions", "seeds", "seed", "fixtures",
 }
+
+# File-name patterns that indicate infrastructure/schema files rather than
+# testable business logic. These are skipped even when not inside a _SKIP_DIR.
+_SKIP_FILE_RE = re.compile(
+    r"(^|\b)(env\.py|alembic\.ini|manage\.py|wsgi\.py|asgi\.py"
+    r"|settings\.py|conftest\.py|__init__\.py)$",
+    re.IGNORECASE,
+)
 
 # Patterns that signal a file has testable behaviour
 _ENTRY_PATTERNS = [
@@ -493,8 +505,11 @@ def _find_entry_points_from_fs(project_path: str, max_files: int = 3000) -> list
     for fp in root.rglob("*"):
         if any(skip in fp.parts for skip in _SKIP_DIRS):
             continue
-        if fp.is_file() and fp.suffix in _ENTRY_POINT_EXTENSIONS:
-            candidates.append(fp)
+        if not fp.is_file() or fp.suffix not in _ENTRY_POINT_EXTENSIONS:
+            continue
+        if _SKIP_FILE_RE.search(fp.name):
+            continue
+        candidates.append(fp)
 
     # Sort so files are visited in a predictable, path-ordered way
     candidates.sort(key=lambda p: str(p))
