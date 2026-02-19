@@ -319,6 +319,11 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
                     <Badge variant="secondary" className="text-xs px-1">
                       {test.test_type === 'api' ? 'Backend' : test.test_type === 'database' ? 'Database' : 'Frontend'}
                     </Badge>
+                    {test.test_language && (
+                      <Badge variant="outline" className="text-[10px] px-1">
+                        {test.test_language}
+                      </Badge>
+                    )}
                     {test.entry_point && (
                       <span className="text-xs text-muted-foreground truncate">
                         {test.entry_point.split('/').pop()}
@@ -414,7 +419,12 @@ export function TestSuggestionsView({ projectId }: TestSuggestionsViewProps) {
             >
               <MonacoEditor
                 height="100%"
-                language={selected.test_type === 'e2e' ? 'typescript' : 'python'}
+                language={
+                  selected.test_language === 'go' ? 'go' :
+                  selected.test_language === 'typescript' ? 'typescript' :
+                  selected.test_language === 'javascript' ? 'javascript' :
+                  selected.test_type === 'e2e' ? 'typescript' : 'python'
+                }
                 theme="vs-dark"
                 value={selected.test_code}
                 options={{

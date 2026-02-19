@@ -42,6 +42,7 @@ export interface GeneratedTestItem {
   test_name: string
   test_code: string
   test_type: string
+  test_language?: string
   entry_point?: string
   accepted: boolean
   created_at: string
@@ -128,6 +129,9 @@ export interface TestResultItem {
   screenshot_path?: string
   video_path?: string
   trace_id?: string
+  test_language?: string
+  test_framework?: string
+  error_category?: string
   metadata?: {
     network_requests?: NetworkRequest[]
     [key: string]: unknown
@@ -578,6 +582,18 @@ class ApiClient {
   async clearWorkspace(projectId: string): Promise<void> {
     await this.request(`/api/v1/projects/${projectId}/workspace`, {
       method: 'DELETE',
+    })
+  }
+
+  async putWorkspaceFile(
+    projectId: string,
+    path: string,
+    content: string
+  ): Promise<WorkspaceSyncStatus> {
+    const content_b64 = btoa(unescape(encodeURIComponent(content)))
+    return this.request(`/api/v1/projects/${projectId}/workspace/files`, {
+      method: 'PUT',
+      body: JSON.stringify({ path, content_b64 }),
     })
   }
 

@@ -82,6 +82,26 @@ const STATUS_COLORS: Record<string, string> = {
   running: 'text-blue-500',
 }
 
+const LANGUAGE_COLORS: Record<string, string> = {
+  python: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300',
+  typescript: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-300',
+  javascript: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300',
+  go: 'bg-cyan-100 text-cyan-800 dark:bg-cyan-900 dark:text-cyan-300',
+  java: 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-300',
+}
+
+const ERROR_CATEGORY_COLORS: Record<string, string> = {
+  timeout: 'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-300',
+  assertion: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300',
+  network: 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-300',
+  import_error: 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-300',
+  syntax: 'bg-pink-100 text-pink-800 dark:bg-pink-900 dark:text-pink-300',
+  permission: 'bg-slate-100 text-slate-800 dark:bg-slate-900 dark:text-slate-300',
+  setup: 'bg-violet-100 text-violet-800 dark:bg-violet-900 dark:text-violet-300',
+  crash: 'bg-red-200 text-red-900 dark:bg-red-950 dark:text-red-200',
+  unknown: 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-300',
+}
+
 // ── Default editor content ─────────────────────────────────────────────────
 const EDITOR_TEMPLATE = `import { test, expect } from '@playwright/test'
 
@@ -447,6 +467,44 @@ export function TestRunnerPage() {
         ))}
       </div>
 
+      {/* ── Language breakdown bar ── */}
+      {results.length > 0 && (() => {
+        const langCounts: Record<string, number> = {}
+        for (const r of results) {
+          if (r.test_language) langCounts[r.test_language] = (langCounts[r.test_language] || 0) + 1
+        }
+        const langs = Object.entries(langCounts).sort((a, b) => b[1] - a[1])
+        if (langs.length === 0) return null
+        return (
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-muted-foreground font-medium">Languages:</span>
+            <div className="flex-1 flex h-2 rounded-full overflow-hidden bg-muted">
+              {langs.map(([lang, count]) => (
+                <div
+                  key={lang}
+                  className={cn(
+                    'h-full',
+                    lang === 'python' ? 'bg-blue-500' :
+                    lang === 'typescript' ? 'bg-indigo-500' :
+                    lang === 'javascript' ? 'bg-yellow-500' :
+                    lang === 'go' ? 'bg-cyan-500' :
+                    lang === 'java' ? 'bg-orange-500' :
+                    'bg-gray-400'
+                  )}
+                  style={{ width: `${(count / results.length) * 100}%` }}
+                  title={`${lang}: ${count} tests`}
+                />
+              ))}
+            </div>
+            {langs.map(([lang, count]) => (
+              <span key={lang} className={cn('px-1.5 py-0.5 rounded font-medium', LANGUAGE_COLORS[lang] || 'bg-gray-100 text-gray-600')}>
+                {lang} {count}
+              </span>
+            ))}
+          </div>
+        )
+      })()}
+
       {/* ── Main Tabs ── */}
       <Tabs defaultValue="logs">
         <TabsList>
@@ -569,8 +627,17 @@ export function TestRunnerPage() {
                         </span>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-medium truncate">{r.test_name}</p>
-                          <p className="text-xs text-muted-foreground">
-                            {r.test_layer} · {r.duration_ms ? `${r.duration_ms}ms` : '—'}
+                          <p className="text-xs text-muted-foreground flex items-center gap-1">
+                            {r.test_layer}
+                            {r.test_language && (
+                              <span className={cn('px-1 rounded text-[10px] font-medium', LANGUAGE_COLORS[r.test_language] || 'bg-gray-100 text-gray-600')}>
+                                {r.test_language}
+                              </span>
+                            )}
+                            {r.test_framework && (
+                              <span className="text-[10px] font-mono opacity-60">{r.test_framework}</span>
+                            )}
+                            <span>· {r.duration_ms ? `${r.duration_ms}ms` : '—'}</span>
                           </p>
                         </div>
                         <ChevronRight className="h-4 w-4 text-muted-foreground mt-0.5 flex-shrink-0" />
@@ -611,6 +678,21 @@ export function TestRunnerPage() {
                           {selectedResult.status}
                         </Badge>
                         <Badge variant="outline">{selectedResult.test_layer}</Badge>
+                        {selectedResult.test_language && (
+                          <Badge className={cn('text-xs', LANGUAGE_COLORS[selectedResult.test_language] || 'bg-gray-100')}>
+                            {selectedResult.test_language}
+                          </Badge>
+                        )}
+                        {selectedResult.test_framework && (
+                          <Badge variant="outline" className="font-mono text-xs">
+                            {selectedResult.test_framework}
+                          </Badge>
+                        )}
+                        {selectedResult.error_category && selectedResult.error_category !== 'unknown' && (
+                          <Badge className={cn('text-xs', ERROR_CATEGORY_COLORS[selectedResult.error_category] || ERROR_CATEGORY_COLORS.unknown)}>
+                            {selectedResult.error_category.replace('_', ' ')}
+                          </Badge>
+                        )}
                         {selectedResult.duration_ms != null && (
                           <Badge variant="outline">{selectedResult.duration_ms}ms</Badge>
                         )}

@@ -44,6 +44,9 @@ class TestResultResponse(BaseModel):
     screenshot_path: str | None
     video_path: str | None
     trace_id: str | None
+    test_language: str | None = None
+    test_framework: str | None = None
+    error_category: str | None = None
     metadata: dict | None = None
     created_at: datetime
 
@@ -66,6 +69,9 @@ class TestResultResponse(BaseModel):
                 "screenshot_path": getattr(orm, "screenshot_path", None),
                 "video_path": getattr(orm, "video_path", None),
                 "trace_id": getattr(orm, "trace_id", None),
+                "test_language": getattr(orm, "test_language", None),
+                "test_framework": getattr(orm, "test_framework", None),
+                "error_category": getattr(orm, "error_category", None),
                 "metadata": orm.result_metadata,
                 "created_at": getattr(orm, "created_at", None),
             }

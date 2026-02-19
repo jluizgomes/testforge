@@ -102,6 +102,27 @@ _PAGE_PATH_RE = re.compile(
 )
 
 
+_EXT_TO_LANG: dict[str, str] = {
+    ".py": "python",
+    ".go": "go",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".java": "java",
+    ".rb": "ruby",
+    ".php": "php",
+    ".vue": "typescript",
+    ".svelte": "typescript",
+}
+
+
+def _detect_entry_language(ep: dict[str, Any]) -> str:
+    """Detect the programming language of an entry point from its file extension."""
+    ext = ep.get("extension", Path(ep.get("path", "")).suffix).lower()
+    return _EXT_TO_LANG.get(ext, "python")
+
+
 def _classify_entry_point(ep: dict[str, Any]) -> str:
     """Classify an entry point as api/e2e/unit/integration/database/component.
 
@@ -207,6 +228,7 @@ class GeneratedTestResponse(BaseModel):
     test_name: str
     test_code: str
     test_type: str
+    test_language: str | None = None
     entry_point: str | None
     accepted: bool
     created_at: datetime
@@ -412,6 +434,7 @@ def _build_rich_prompt(
     env_vars: dict[str, str],
     openapi_endpoints: list[dict[str, Any]] | None,
     test_type: str,
+    language: str = "python",
 ) -> str:
     """Build a rich, contextualized prompt with real URLs, credentials, and endpoints."""
     sections: list[str] = []
@@ -419,6 +442,7 @@ def _build_rich_prompt(
     # Header
     sections.append(f"Generate DISTINCT {test_type} tests for the module/group: {group_name}")
     sections.append(f"Number of source files in this group: {len(entry_points)}")
+    sections.append(f"Target language: {language}")
 
     # Project URLs
     if config:
@@ -481,53 +505,99 @@ def _build_rich_prompt(
             file_lines.append(f"--- {path} ---")
     sections.append("Source files:\n" + "\n\n".join(file_lines))
 
-    # Instructions
-    if test_type == "api":
-        type_rules = (
-            "- Use Python + pytest-asyncio + httpx.AsyncClient\n"
-            "- BASE_URL = os.environ.get('BACKEND_URL', '...').rstrip('/')\n"
-            "- Generate ONE complete test FILE per source file, each with 4-6 test functions covering:\n"
-            "    • GET list (collection endpoint)\n"
-            "    • GET single item (by ID)\n"
-            "    • POST create (with realistic payload from the source fields)\n"
-            "    • PUT/PATCH update\n"
-            "    • DELETE\n"
-            "    • Error case: 404 for non-existent ID\n"
-            "    • Error case: 422 for invalid payload\n"
-            "- Try multiple candidate paths: /api/v1/{resource}, /api/{resource}, /{resource}\n"
-            "- Use pytest.skip() if the endpoint isn't reachable (don't fail the test)"
-        )
-    elif test_type == "database":
-        type_rules = (
-            "- Use Python + pytest-asyncio + httpx.AsyncClient to test database-backed endpoints\n"
-            "- BASE_URL = os.environ.get('BACKEND_URL', '...').rstrip('/')\n"
-            "- Generate ONE complete test FILE per source file, each with 3-5 test functions covering:\n"
-            "    • List/read all records\n"
-            "    • Create a record and read it back\n"
-            "    • Update a record\n"
-            "    • Delete a record\n"
-            "    • Constraint/validation error (duplicate, missing required field)\n"
-            "- Verify data integrity (created record appears in list, deleted record returns 404)"
-        )
+    # Instructions — language-specific rules
+    if language == "go":
+        if test_type in ("api", "database"):
+            type_rules = (
+                "- Use Go standard testing package + net/http\n"
+                "- baseURL := os.Getenv(\"BACKEND_URL\") — fall back to a sensible default\n"
+                "- Generate ONE complete test FILE per source file with 3-5 test functions:\n"
+                "    • TestXxx_List — GET collection endpoint\n"
+                "    • TestXxx_GetByID — GET single item\n"
+                "    • TestXxx_Create — POST with JSON body\n"
+                "    • TestXxx_NotFound — 404 for missing ID\n"
+                "- Use t.Skip() when endpoint is unreachable, t.Errorf() for failures\n"
+                "- Import \"encoding/json\", \"net/http\", \"os\", \"testing\""
+            )
+        else:
+            type_rules = (
+                "- Use Go testing package\n"
+                "- Generate ONE complete test FILE per source file with 2-3 test functions\n"
+                "- Use t.Skip() when preconditions not met, t.Errorf() for failures"
+            )
+    elif language in ("typescript", "javascript"):
+        if test_type == "e2e":
+            type_rules = (
+                "- Use Playwright TypeScript: import { test, expect } from '@playwright/test'\n"
+                "- const FRONTEND_URL = process.env.FRONTEND_URL || '...'\n"
+                "- Generate ONE complete test FILE per source file with 2-3 test cases:\n"
+                "    • test('loads page', ...) — page.goto(), expect status < 500\n"
+                "    • test('has visible content', ...) — expect(locator).toBeVisible()\n"
+                "    • test('interaction', ...) — click/fill, navigate, check state\n"
+                "- Use data-testid selectors when possible"
+            )
+        else:
+            type_rules = (
+                "- Use Vitest: import { describe, it, expect } from 'vitest'\n"
+                "- const BASE_URL = process.env.BACKEND_URL || '...'\n"
+                "- Generate ONE complete test FILE per source file with 3-5 tests:\n"
+                "    • it('GET list') — fetch collection, expect 200\n"
+                "    • it('GET by ID') — fetch single item\n"
+                "    • it('POST create') — create with body, expect 201\n"
+                "    • it('404 not found') — non-existent ID returns 404\n"
+                "- Use native fetch() for HTTP requests"
+            )
     else:
-        type_rules = (
-            "- Use Python + pytest-playwright (NOT TypeScript — the runner is Python/pytest)\n"
-            "- from playwright.sync_api import Page, expect\n"
-            "- FRONTEND_URL = os.environ.get('FRONTEND_URL', '...').rstrip('/')\n"
-            "- Generate ONE complete Python test FILE per source file with 2-3 test functions:\n"
-            "    • def test_X_page_loads(page: Page) — page.goto(), assert response.status < 500\n"
-            "    • def test_X_has_visible_content(page: Page) — expect(locator).to_be_visible()\n"
-            "    • def test_X_interaction(page: Page) — click/fill, navigate, check state\n"
-            "- Screenshots are captured automatically on failure — no extra code needed\n"
-            "- Use sync playwright API only (no async/await)\n"
-            "- IMPORTANT: output Python code, not TypeScript"
-        )
+        # Python (default)
+        if test_type == "api":
+            type_rules = (
+                "- Use Python + pytest-asyncio + httpx.AsyncClient\n"
+                "- BASE_URL = os.environ.get('BACKEND_URL', '...').rstrip('/')\n"
+                "- Generate ONE complete test FILE per source file, each with 4-6 test functions covering:\n"
+                "    • GET list (collection endpoint)\n"
+                "    • GET single item (by ID)\n"
+                "    • POST create (with realistic payload from the source fields)\n"
+                "    • PUT/PATCH update\n"
+                "    • DELETE\n"
+                "    • Error case: 404 for non-existent ID\n"
+                "    • Error case: 422 for invalid payload\n"
+                "- Try multiple candidate paths: /api/v1/{resource}, /api/{resource}, /{resource}\n"
+                "- Use pytest.skip() if the endpoint isn't reachable (don't fail the test)"
+            )
+        elif test_type == "database":
+            type_rules = (
+                "- Use Python + pytest-asyncio + httpx.AsyncClient to test database-backed endpoints\n"
+                "- BASE_URL = os.environ.get('BACKEND_URL', '...').rstrip('/')\n"
+                "- Generate ONE complete test FILE per source file, each with 3-5 test functions covering:\n"
+                "    • List/read all records\n"
+                "    • Create a record and read it back\n"
+                "    • Update a record\n"
+                "    • Delete a record\n"
+                "    • Constraint/validation error (duplicate, missing required field)\n"
+                "- Verify data integrity (created record appears in list, deleted record returns 404)"
+            )
+        else:
+            type_rules = (
+                "- Use Python + pytest-playwright (NOT TypeScript — the runner is Python/pytest)\n"
+                "- from playwright.sync_api import Page, expect\n"
+                "- FRONTEND_URL = os.environ.get('FRONTEND_URL', '...').rstrip('/')\n"
+                "- Generate ONE complete Python test FILE per source file with 2-3 test functions:\n"
+                "    • def test_X_page_loads(page: Page) — page.goto(), assert response.status < 500\n"
+                "    • def test_X_has_visible_content(page: Page) — expect(locator).to_be_visible()\n"
+                "    • def test_X_interaction(page: Page) — click/fill, navigate, check state\n"
+                "- Screenshots are captured automatically on failure — no extra code needed\n"
+                "- Use sync playwright API only (no async/await)\n"
+                "- IMPORTANT: output Python code, not TypeScript"
+            )
+
+    lang_code_block = {"go": "go", "typescript": "typescript", "javascript": "javascript"}.get(language, "python")
     sections.append(
         "IMPORTANT RULES:\n"
         f"{type_rules}\n"
+        "- Generate tests in the SAME language as the source code\n"
         "- Use the REAL URLs and credentials provided above, NOT localhost:8000 or placeholder values\n"
         "- Each code block must be a complete, runnable test file\n"
-        "- Separate each test file with a code block (```python or ```typescript)\n"
+        f"- Separate each test file with a code block (```{lang_code_block})\n"
         "- Do NOT add explanatory text between code blocks"
     )
 
@@ -824,6 +894,13 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                             relevant_set[key] = rel
                     relevant_endpoints = list(relevant_set.values()) or openapi_endpoints[:5]
 
+                # Detect dominant language from group entry points
+                lang_counts: dict[str, int] = {}
+                for ep in group_eps:
+                    lang = _detect_entry_language(ep)
+                    lang_counts[lang] = lang_counts.get(lang, 0) + 1
+                group_language = max(lang_counts, key=lambda l: lang_counts[l]) if lang_counts else "python"
+
                 # Determine test_type from the dominant resource_type in this group.
                 # Priority: database > e2e > component > integration > api > unit
                 resource_types = [ep.get("resource_type", "api") for ep in group_eps]
@@ -846,6 +923,7 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                     env_vars=all_env_vars,
                     openapi_endpoints=relevant_endpoints,
                     test_type=test_type,
+                    language=group_language,
                 )
 
                 # Build project context for the AI agent
@@ -877,12 +955,12 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                     except Exception as exc:
                         logger.debug("AI generation failed for group %s: %s", group_name, exc)
                         tests = [
-                            _template_for(ep.get("path", "unknown"), test_type, config)
+                            _template_for(ep.get("path", "unknown"), test_type, config, language=group_language)
                             for ep in group_eps[:3]
                         ]
                 else:
                     tests = [
-                        _template_for(ep.get("path", "unknown"), test_type, config)
+                        _template_for(ep.get("path", "unknown"), test_type, config, language=group_language)
                         for ep in group_eps[:3]
                     ]
 
@@ -902,12 +980,14 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                             "unit": "api",
                             "api": "api",
                         }.get(rt, test_type)
+                    ep_lang = _detect_entry_language(ep_data) if ep_data else group_language
                     gt = GeneratedTest(
                         scan_job_id=job_id,
                         project_id=job.project_id,
                         test_name=f"Test: {Path(ep_path).stem}",
                         test_code=code,
                         test_type=ep_test_type,
+                        test_language=ep_lang,
                         entry_point=ep_path,
                         content_hash=ep_data.get("content_hash"),
                         accepted=False,
@@ -956,7 +1036,12 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                     await _broadcast_scan_progress(err_job)
 
 
-def _template_for(path: str, test_type: str, config: ProjectConfig | None = None) -> str:
+def _template_for(
+    path: str,
+    test_type: str,
+    config: ProjectConfig | None = None,
+    language: str = "python",
+) -> str:
     """Return a starter test template for a given file, using env vars for URLs."""
     name = Path(path).stem
     safe_name = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "module"
@@ -965,6 +1050,105 @@ def _template_for(path: str, test_type: str, config: ProjectConfig | None = None
     frontend_url = (config.frontend_url if config and config.frontend_url else "http://localhost:3000")
     # Derive candidate API paths from the module name (e.g. "projects" → /api/v1/projects)
     slug = safe_name.replace("_", "-")
+
+    # ── Go templates ──────────────────────────────────────────────────────────
+    if language == "go":
+        camel = "".join(w.capitalize() for w in safe_name.split("_")) or "Module"
+        if test_type in ("api", "database", "integration"):
+            return f'''package {safe_name}_test
+
+import (
+\t"encoding/json"
+\t"net/http"
+\t"os"
+\t"testing"
+)
+
+func baseURL() string {{
+\tif u := os.Getenv("BACKEND_URL"); u != "" {{
+\t\treturn u
+\t}}
+\treturn "{backend_url}"
+}}
+
+func Test{camel}_List(t *testing.T) {{
+\tresp, err := http.Get(baseURL() + "/api/v1/{slug}")
+\tif err != nil {{
+\t\tt.Skipf("backend not reachable: %v", err)
+\t}}
+\tdefer resp.Body.Close()
+\tif resp.StatusCode >= 500 {{
+\t\tt.Errorf("expected non-5xx, got %d", resp.StatusCode)
+\t}}
+}}
+
+func Test{camel}_NotFound(t *testing.T) {{
+\tresp, err := http.Get(baseURL() + "/api/v1/{slug}/nonexistent-id")
+\tif err != nil {{
+\t\tt.Skipf("backend not reachable: %v", err)
+\t}}
+\tdefer resp.Body.Close()
+\tif resp.StatusCode != 404 && resp.StatusCode != 401 {{
+\t\tt.Errorf("expected 404 or 401, got %d", resp.StatusCode)
+\t}}
+\t_ = json.NewDecoder(resp.Body)
+}}
+'''
+        return f'''package {safe_name}_test
+
+import "testing"
+
+func Test{camel}_Basic(t *testing.T) {{
+\tt.Log("placeholder test for {path}")
+}}
+'''
+
+    # ── TypeScript / JavaScript templates ─────────────────────────────────────
+    if language in ("typescript", "javascript"):
+        if test_type == "e2e":
+            return f"""import {{ test, expect }} from '@playwright/test'
+
+const FRONTEND_URL = process.env.FRONTEND_URL || '{frontend_url}'
+
+test.describe('{name}', () => {{
+  test('page loads', async ({{ page }}) => {{
+    const response = await page.goto(FRONTEND_URL + '/{slug}')
+    expect(response?.status()).toBeLessThan(500)
+  }})
+
+  test('has visible content', async ({{ page }}) => {{
+    await page.goto(FRONTEND_URL + '/{slug}')
+    await page.waitForLoadState('networkidle')
+    await expect(page.locator('body')).toBeVisible()
+  }})
+}})
+"""
+        # API tests with Vitest
+        return f"""import {{ describe, it, expect }} from 'vitest'
+
+const BASE_URL = process.env.BACKEND_URL || '{backend_url}'
+
+describe('{name}', () => {{
+  it('GET /api/v1/{slug} returns non-5xx', async () => {{
+    const res = await fetch(`${{BASE_URL}}/api/v1/{slug}`)
+    expect(res.status).toBeLessThan(500)
+  }})
+
+  it('GET /api/v1/{slug}/missing returns 404', async () => {{
+    const res = await fetch(`${{BASE_URL}}/api/v1/{slug}/nonexistent-id`)
+    expect([400, 401, 403, 404, 405]).toContain(res.status)
+  }})
+
+  it('POST /api/v1/{slug} with empty body returns 422', async () => {{
+    const res = await fetch(`${{BASE_URL}}/api/v1/{slug}`, {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{}}),
+    }})
+    expect(res.status).toBeLessThan(500)
+  }})
+}})
+"""
 
     if test_type in ("api", "integration"):
         return f"""import os

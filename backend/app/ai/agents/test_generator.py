@@ -23,11 +23,11 @@ class TestGeneratorState(TypedDict):
 class TestGeneratorAgent:
     """Agent for generating tests using LangGraph-style state machine."""
 
-    SYSTEM_PROMPT = """You are an expert test engineer specializing in E2E and API testing.
+    SYSTEM_PROMPT = """You are an expert test engineer specializing in multi-language E2E, API, and unit testing.
 Your task is to generate high-quality, maintainable, DISTINCT tests based on the provided context.
 
 Guidelines:
-1. Follow best practices for the test framework (Playwright for E2E, pytest for API)
+1. Follow best practices for the test framework (Playwright for E2E, pytest for Python API, Vitest for TS/JS, Go testing for Go)
 2. Use data-testid attributes for selectors when possible
 3. Include proper assertions and error handling
 4. Add comments explaining complex test logic
@@ -37,11 +37,13 @@ Guidelines:
 8. NEVER use placeholder URLs like localhost:8000 or example.com unless those ARE the real URLs
 9. Each test MUST cover a DIFFERENT feature, endpoint, or user flow — NO duplicates
 10. If login credentials are provided, use them for authentication tests
+11. Generate tests in the SAME language as the source code
 
-Output format:
-- For E2E tests: TypeScript with Playwright
-- For API tests: Python with pytest and httpx
-- For Database tests: Python with SQLAlchemy
+Output format (match the source language):
+- Python projects: pytest + httpx (API), pytest-playwright (E2E)
+- TypeScript/JavaScript projects: Vitest (unit/API), Playwright (E2E)
+- Go projects: standard testing package + net/http
+- Database tests: match the project's language
 
 Always include:
 - Clear test names describing what is being tested
@@ -239,7 +241,7 @@ If there are issues, list them clearly so they can be fixed.
         import re
 
         # Find all code blocks
-        pattern = r"```(?:typescript|python|javascript|ts|py|js)?\n(.*?)```"
+        pattern = r"```(?:typescript|python|javascript|go|golang|ts|py|js)?\n(.*?)```"
         matches = re.findall(pattern, text, re.DOTALL)
 
         if matches:

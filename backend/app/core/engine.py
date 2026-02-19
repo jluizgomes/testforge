@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.error_categorizer import categorize_error
 from app.db.session import async_session_factory
 from app.models.project import Project, ProjectConfig
 from app.models.test_run import TestResult, TestRun, TestResultStatus, TestRunStatus
@@ -699,6 +700,8 @@ def _parse_playwright_output(raw: str) -> list[dict[str, Any]]:
                                 screenshot_path = att_path
                             break
 
+                    err_msg = error.get("message") if error else None
+                    err_stk = error.get("stack") if error else None
                     results.append(
                         {
                             "test_name": spec_title,
@@ -707,9 +710,12 @@ def _parse_playwright_output(raw: str) -> list[dict[str, Any]]:
                             "test_layer": "frontend",
                             "status": status,
                             "duration_ms": attempt.get("duration", 0),
-                            "error_message": error.get("message") if error else None,
-                            "error_stack": error.get("stack") if error else None,
+                            "error_message": err_msg,
+                            "error_stack": err_stk,
                             "screenshot_path": screenshot_path,
+                            "test_language": "typescript",
+                            "test_framework": "playwright",
+                            "error_category": categorize_error(err_msg, err_stk),
                         }
                     )
 
@@ -788,6 +794,8 @@ def _parse_pytest_output(raw: str) -> list[dict[str, Any]]:
         if network_requests:
             extra_data = {"network_requests": network_requests}
 
+        err_msg = str(longrepr)[:500] if longrepr else None
+        err_stk = str(longrepr) if longrepr else None
         results.append(
             {
                 "test_name": test_name,
@@ -796,12 +804,326 @@ def _parse_pytest_output(raw: str) -> list[dict[str, Any]]:
                 "test_layer": layer,
                 "status": status,
                 "duration_ms": int(t.get("duration", 0) * 1000),
-                "error_message": str(longrepr)[:500] if longrepr else None,
-                "error_stack": str(longrepr) if longrepr else None,
+                "error_message": err_msg,
+                "error_stack": err_stk,
                 "screenshot_path": screenshot_path,
                 "extra_data": extra_data,
+                "test_language": "python",
+                "test_framework": "pytest",
+                "error_category": categorize_error(err_msg, err_stk),
             }
         )
+    return results
+
+
+# ── RunnerConfig + multi-runner detection ─────────────────────────────────────
+
+from typing import TypedDict
+
+
+class RunnerConfig(TypedDict):
+    layer: str          # frontend, backend
+    cmd: list[str]
+    cwd: str
+    language: str       # python, typescript, javascript, go
+    framework: str      # pytest, playwright, jest, vitest, go-test
+
+
+def _detect_all_runners(
+    project_path: str,
+    *,
+    parallel_workers: int = 1,
+    retry_count: int = 0,
+    test_timeout: int = 30000,
+    browser: str | None = None,
+    venv_bin: Path | None = None,
+) -> list[RunnerConfig]:
+    """Detect ALL test runners in the project (not just the first match).
+
+    Returns a list of RunnerConfig dicts.  Falls back to _detect_runner()
+    if only one runner is found.
+    """
+    project_path = _translate_path(project_path)
+    raw = Path(project_path)
+    try:
+        base = raw.resolve()
+    except (OSError, RuntimeError):
+        base = raw
+    if not base.exists() or not base.is_dir():
+        # Let _detect_runner handle the error message
+        layer, cmd, cwd = _detect_runner(
+            project_path,
+            parallel_workers=parallel_workers,
+            retry_count=retry_count,
+            test_timeout=test_timeout,
+            browser=browser,
+            venv_bin=venv_bin,
+        )
+        return [RunnerConfig(layer=layer, cmd=cmd, cwd=cwd, language="unknown", framework="unknown")]
+
+    runners: list[RunnerConfig] = []
+
+    # 1. Playwright (TypeScript/JavaScript)
+    npx = shutil.which("npx")
+    if npx:
+        playwright_configs = ("playwright.config.ts", "playwright.config.js", "playwright.config.mjs")
+        search_dirs: list[Path] = [base]
+        for sub in ("e2e", "tests", "tests/e2e", "playwright", "e2e/tests", "frontend", "app", "apps/web", "packages/e2e"):
+            d = base / sub
+            if d.is_dir():
+                search_dirs.append(d)
+        for sub in list(search_dirs):
+            if sub != base:
+                for sub2 in ("e2e", "tests", "playwright"):
+                    d2 = sub / sub2
+                    if d2.is_dir():
+                        search_dirs.append(d2)
+
+        for root in search_dirs:
+            for cfg in playwright_configs:
+                if (root / cfg).exists():
+                    cmd = [
+                        npx, "playwright", "test",
+                        "--reporter=json",
+                        "--screenshot=only-on-failure",
+                        "--output=/app/screenshots/pw-results",
+                    ]
+                    if parallel_workers > 1:
+                        cmd += [f"--workers={parallel_workers}"]
+                    if retry_count > 0:
+                        cmd += [f"--retries={retry_count}"]
+                    if test_timeout != 30000:
+                        cmd += [f"--timeout={test_timeout}"]
+                    if browser and browser in ("chromium", "firefox", "webkit"):
+                        cmd += [f"--project={browser}"]
+                    runners.append(RunnerConfig(
+                        layer="frontend", cmd=cmd, cwd=str(root),
+                        language="typescript", framework="playwright",
+                    ))
+                    break  # one Playwright runner per project
+            if runners:
+                break
+
+    # 2. pytest (Python)
+    _pytest_cfgs = (
+        "pyproject.toml", "setup.cfg", "pytest.ini", "setup.py",
+        "conftest.py", "requirements.txt",
+    )
+    _pytest_search: list[Path] = [base]
+    for _sub in ("backend", "api", "server", "src", "app", "lib", "tests"):
+        _d = base / _sub
+        if _d.is_dir():
+            _pytest_search.append(_d)
+
+    for _pytest_dir in _pytest_search:
+        for cfg in _pytest_cfgs:
+            if (_pytest_dir / cfg).exists():
+                if venv_bin is not None:
+                    venv_pytest = (venv_bin / "pytest").resolve()
+                    pytest_bin = str(venv_pytest) if venv_pytest.exists() else (shutil.which("pytest") or sys.executable + " -m pytest")
+                else:
+                    pytest_bin = shutil.which("pytest") or sys.executable + " -m pytest"
+                _json_report_arg = "--json-report-file=.testforge_report.json"
+                if " " in pytest_bin:
+                    cmd = pytest_bin.split() + ["--json-report", _json_report_arg, "-v", "-p", "no:base_url"]
+                else:
+                    cmd = [pytest_bin, "--json-report", _json_report_arg, "-v", "-p", "no:base_url"]
+                if parallel_workers > 1:
+                    cmd += ["-n", str(parallel_workers)]
+                if retry_count > 0:
+                    cmd += [f"--count={retry_count}"]
+                if test_timeout != 30000:
+                    cmd += [f"--timeout={test_timeout // 1000}"]
+                runners.append(RunnerConfig(
+                    layer="backend", cmd=cmd, cwd=str(_pytest_dir),
+                    language="python", framework="pytest",
+                ))
+                break
+        if any(r["framework"] == "pytest" for r in runners):
+            break
+
+    # 3. Go test
+    go_bin = shutil.which("go")
+    if go_bin and (base / "go.mod").exists():
+        runners.append(RunnerConfig(
+            layer="backend",
+            cmd=[go_bin, "test", "-json", "-count=1", "./..."],
+            cwd=str(base),
+            language="go",
+            framework="go-test",
+        ))
+
+    # 4. Vitest
+    if npx:
+        vitest_configs = ("vitest.config.ts", "vitest.config.js", "vitest.config.mts")
+        has_vitest_config = any((base / cfg).exists() for cfg in vitest_configs)
+        has_vitest_dep = False
+        pkg_json = base / "package.json"
+        if not has_vitest_config and pkg_json.exists():
+            try:
+                pkg_data = json.loads(pkg_json.read_text())
+                all_deps = {**pkg_data.get("dependencies", {}), **pkg_data.get("devDependencies", {})}
+                has_vitest_dep = "vitest" in all_deps
+            except Exception:
+                pass
+        if has_vitest_config or has_vitest_dep:
+            runners.append(RunnerConfig(
+                layer="frontend",
+                cmd=[npx, "vitest", "run", "--reporter=json"],
+                cwd=str(base),
+                language="typescript",
+                framework="vitest",
+            ))
+
+    # 5. Jest
+    if npx and not any(r["framework"] == "vitest" for r in runners):
+        if pkg_json.exists():
+            try:
+                pkg_data = json.loads(pkg_json.read_text())
+                all_deps = {**pkg_data.get("dependencies", {}), **pkg_data.get("devDependencies", {})}
+                if "jest" in all_deps:
+                    runners.append(RunnerConfig(
+                        layer="frontend",
+                        cmd=[npx, "jest", "--json", "--forceExit"],
+                        cwd=str(base),
+                        language="javascript",
+                        framework="jest",
+                    ))
+            except Exception:
+                pass
+
+    if not runners:
+        # Fall back to existing _detect_runner for error handling
+        layer, cmd, cwd = _detect_runner(
+            project_path,
+            parallel_workers=parallel_workers,
+            retry_count=retry_count,
+            test_timeout=test_timeout,
+            browser=browser,
+            venv_bin=venv_bin,
+        )
+        runners.append(RunnerConfig(layer=layer, cmd=cmd, cwd=cwd, language="unknown", framework="unknown"))
+
+    logger.info("engine: detected %d runner(s): %s", len(runners), [r["framework"] for r in runners])
+    return runners
+
+
+# ── Go test JSON parser ──────────────────────────────────────────────────────
+
+def _parse_go_test_output(raw: str) -> list[dict[str, Any]]:
+    """Parse `go test -json` NDJSON output into result dicts."""
+    results: list[dict[str, Any]] = []
+    # Accumulate output lines per test
+    outputs: dict[str, list[str]] = {}  # "pkg/TestName" → lines
+    elapsed: dict[str, float] = {}
+
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        action = event.get("Action", "")
+        test_name = event.get("Test", "")
+        package = event.get("Package", "")
+
+        if not test_name:
+            continue
+
+        key = f"{package}/{test_name}"
+
+        if action == "output":
+            outputs.setdefault(key, []).append(event.get("Output", ""))
+
+        if action in ("pass", "fail", "skip"):
+            elapsed[key] = event.get("Elapsed", 0)
+            status_map = {
+                "pass": TestResultStatus.PASSED,
+                "fail": TestResultStatus.FAILED,
+                "skip": TestResultStatus.SKIPPED,
+            }
+            output_text = "".join(outputs.get(key, []))
+            err_msg = output_text[:500] if action == "fail" else None
+            err_stk = output_text if action == "fail" else None
+            results.append({
+                "test_name": test_name,
+                "test_file": package,
+                "test_suite": package,
+                "test_layer": "backend",
+                "status": status_map.get(action, TestResultStatus.ERROR),
+                "duration_ms": int(elapsed.get(key, 0) * 1000),
+                "error_message": err_msg,
+                "error_stack": err_stk,
+                "test_language": "go",
+                "test_framework": "go-test",
+                "error_category": categorize_error(err_msg, err_stk),
+            })
+
+    return results
+
+
+# ── Jest / Vitest JSON parser ────────────────────────────────────────────────
+
+def _parse_jest_vitest_output(raw: str, framework: str = "jest") -> list[dict[str, Any]]:
+    """Parse Jest/Vitest --json output into result dicts."""
+    results: list[dict[str, Any]] = []
+
+    data = None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        # Try to find JSON in output (Vitest may have extra lines)
+        start = raw.find("{")
+        if start != -1:
+            try:
+                data = json.loads(raw[start:])
+            except json.JSONDecodeError:
+                pass
+    if not data:
+        return results
+
+    for test_file_result in data.get("testResults", []):
+        file_path = test_file_result.get("name", "")
+        # Determine language from file extension
+        ext = Path(file_path).suffix.lower()
+        lang = "typescript" if ext in (".ts", ".tsx") else "javascript"
+        # Determine layer from extension
+        layer = "frontend" if ext in (".tsx", ".jsx") else "backend"
+
+        for assertion in test_file_result.get("assertionResults", []):
+            ancestors = assertion.get("ancestorTitles", [])
+            title = assertion.get("title", "")
+            suite = " > ".join(ancestors) if ancestors else None
+            status_raw = assertion.get("status", "passed")
+            status = {
+                "passed": TestResultStatus.PASSED,
+                "failed": TestResultStatus.FAILED,
+                "skipped": TestResultStatus.SKIPPED,
+                "pending": TestResultStatus.SKIPPED,
+                "todo": TestResultStatus.SKIPPED,
+            }.get(status_raw, TestResultStatus.ERROR)
+
+            failure_msgs = assertion.get("failureMessages", [])
+            err_msg = failure_msgs[0][:500] if failure_msgs else None
+            err_stk = "\n".join(failure_msgs) if failure_msgs else None
+
+            results.append({
+                "test_name": title,
+                "test_file": file_path,
+                "test_suite": suite,
+                "test_layer": layer,
+                "status": status,
+                "duration_ms": assertion.get("duration"),
+                "error_message": err_msg,
+                "error_stack": err_stk,
+                "test_language": lang,
+                "test_framework": framework,
+                "error_category": categorize_error(err_msg, err_stk),
+            })
+
     return results
 
 
@@ -1393,9 +1715,9 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
         except Exception as exc:
             logger.warning("engine: venv setup failed (will use system python): %s", exc)
 
-    # ── Detect runner ─────────────────────────────────────────────────────────
+    # ── Detect runners ────────────────────────────────────────────────────────
     try:
-        layer, cmd, run_cwd = _detect_runner(
+        runners = _detect_all_runners(
             project_path,
             parallel_workers=config.parallel_workers if config else 1,
             retry_count=config.retry_count if config else 0,
@@ -1415,69 +1737,6 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
     # ── Build subprocess env (inherit + inject project vars) ──────────────────
     proc_env = {**os.environ, **env_vars}
 
-    # ── Pre-flight: verify executable and cwd exist before launching ──────────
-    exec_path = Path(cmd[0])
-    if not exec_path.is_absolute():
-        # For PATH-resolved executables (pytest, npx, npm) double-check they exist
-        exec_path = Path(shutil.which(cmd[0]) or cmd[0])
-    if not exec_path.exists():
-        msg = (
-            f"Executable not found: {cmd[0]!r}. "
-            "If running in Docker, ensure Node.js/npm is installed for frontend tests, "
-            "or use a synced workspace so the backend venv pytest can be used."
-        )
-        test_run.status = TestRunStatus.FAILED
-        test_run.error_message = msg
-        test_run.completed_at = datetime.now(timezone.utc)
-        await db.commit()
-        await _broadcast_run(run_id, {"status": "failed", "error_message": msg})
-        logger.error("engine: %s", msg)
-        return
-    if not Path(run_cwd).is_dir():
-        msg = f"Test working directory not found: {run_cwd!r}"
-        test_run.status = TestRunStatus.FAILED
-        test_run.error_message = msg
-        test_run.completed_at = datetime.now(timezone.utc)
-        await db.commit()
-        await _broadcast_run(run_id, {"status": "failed", "error_message": msg})
-        logger.error("engine: %s", msg)
-        return
-
-    logger.info(
-        "engine: running %s in cwd=%s (env_vars=%d keys)",
-        " ".join(cmd),
-        run_cwd,
-        len(env_vars),
-    )
-    await _broadcast_run(run_id, {"log": f"[run] {' '.join(cmd[:2])} in {run_cwd}"})
-
-    # ── Write accepted scan tests to workspace ────────────────────────────────
-    # Tests accepted by the user in the Scanner view are stored in the DB as
-    # GeneratedTest records. Before each pytest run, write them into
-    # tests/testforge/ inside the workspace so pytest discovers them.
-    ts_skipped: list[dict[str, Any]] = []
-    if layer == "backend" and is_workspace:
-        written, ts_skipped, skipped_syntax = await _write_accepted_tests_to_workspace(
-            db, project_id, run_cwd, run_id
-        )
-        if written or ts_skipped or skipped_syntax:
-            parts = [f"[testforge] {written} Python test file(s) loaded"]
-            if ts_skipped:
-                parts.append(f"{len(ts_skipped)} TypeScript/E2E skipped (need Playwright runner)")
-            if skipped_syntax:
-                parts.append(f"{skipped_syntax} skipped (syntax error)")
-            await _broadcast_run(run_id, {"log": " · ".join(parts)})
-
-    # ── Inject testforge conftest for screenshot + network capture ────────────
-    # For ALL pytest (backend) runs, inject a root-level conftest.py that
-    # captures screenshots on failure and records network requests for
-    # Playwright-based tests.  Non-Playwright tests are unaffected.
-    if layer == "backend":
-        try:
-            _inject_testforge_conftest(run_cwd)
-        except Exception as exc:
-            logger.warning("engine: could not inject testforge conftest: %s", exc)
-
     # ── Concurrency guard ─────────────────────────────────────────────────────
     if len(_running_processes) >= MAX_CONCURRENT_RUNS:
         test_run.status = TestRunStatus.FAILED
@@ -1489,135 +1748,201 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
         })
         return
 
-    # ── Execute — stream stdout + stderr live, parse results from JSON file ────
-    # pytest JSON report is written to .testforge_report.json (not stdout),
-    # so both output streams are free for real-time display in Test Logs.
-    returncode = 1
-    proc: asyncio.subprocess.Process | None = None
-    stdout_text = ""
-    stderr_text = ""
+    # Use the first runner's layer/cwd for backwards-compatible pre-run steps
+    primary_layer = runners[0]["layer"]
+    primary_cwd = runners[0]["cwd"]
+
+    # ── Write accepted scan tests to workspace ────────────────────────────────
+    ts_skipped: list[dict[str, Any]] = []
+    if any(r["framework"] == "pytest" for r in runners) and is_workspace:
+        pytest_cwd = next((r["cwd"] for r in runners if r["framework"] == "pytest"), primary_cwd)
+        written, ts_skipped, skipped_syntax = await _write_accepted_tests_to_workspace(
+            db, project_id, pytest_cwd, run_id
+        )
+        if written or ts_skipped or skipped_syntax:
+            parts = [f"[testforge] {written} Python test file(s) loaded"]
+            if ts_skipped:
+                parts.append(f"{len(ts_skipped)} TypeScript/E2E skipped (need Playwright runner)")
+            if skipped_syntax:
+                parts.append(f"{skipped_syntax} skipped (syntax error)")
+            await _broadcast_run(run_id, {"log": " · ".join(parts)})
+
+    # ── Inject testforge conftest for pytest runners ──────────────────────────
+    for runner in runners:
+        if runner["framework"] == "pytest":
+            try:
+                _inject_testforge_conftest(runner["cwd"])
+            except Exception as exc:
+                logger.warning("engine: could not inject testforge conftest: %s", exc)
+
+    # ── Multi-runner execution loop ──────────────────────────────────────────
+    parsed: list[dict[str, Any]] = []
 
     async def _stream_to_logs(stream: asyncio.StreamReader, buf: list[str]) -> None:
         """Read a stream line-by-line and broadcast each line to Test Logs."""
         while True:
-            raw = await stream.readline()
-            if not raw:
+            raw_line = await stream.readline()
+            if not raw_line:
                 break
-            line = raw.decode("utf-8", errors="replace").rstrip()
+            line = raw_line.decode("utf-8", errors="replace").rstrip()
             buf.append(line)
             if line.strip():
                 await _broadcast_run(run_id, {"log": f"[test] {line}"})
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=run_cwd,
-            env=proc_env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _running_processes[run_id] = proc
+    for runner_idx, runner in enumerate(runners):
+        cmd = runner["cmd"]
+        run_cwd = runner["cwd"]
+        layer = runner["layer"]
+        framework = runner["framework"]
+        language = runner["language"]
 
-        stdout_lines: list[str] = []
-        stderr_lines: list[str] = []
-        t_out = asyncio.create_task(_stream_to_logs(proc.stdout, stdout_lines))  # type: ignore[arg-type]
-        t_err = asyncio.create_task(_stream_to_logs(proc.stderr, stderr_lines))  # type: ignore[arg-type]
+        # ── Pre-flight checks ──────────────────────────────────────────────
+        exec_path = Path(cmd[0])
+        if not exec_path.is_absolute():
+            exec_path = Path(shutil.which(cmd[0]) or cmd[0])
+        if not exec_path.exists():
+            await _broadcast_run(run_id, {
+                "log": f"[skip] {framework}: executable not found ({cmd[0]!r})"
+            })
+            logger.warning("engine: skipping runner %s — executable not found: %s", framework, cmd[0])
+            continue
+        if not Path(run_cwd).is_dir():
+            await _broadcast_run(run_id, {
+                "log": f"[skip] {framework}: cwd not found ({run_cwd!r})"
+            })
+            continue
+
+        # Unique report file per runner for pytest
+        report_name = f".testforge_report_{runner_idx}.json"
+        if framework == "pytest":
+            cmd = [c.replace(".testforge_report.json", report_name) for c in cmd]
+
+        logger.info(
+            "engine: [%d/%d] running %s (%s) in cwd=%s",
+            runner_idx + 1, len(runners), framework, language, run_cwd,
+        )
+        await _broadcast_run(run_id, {"log": f"[run] [{runner_idx + 1}/{len(runners)}] {framework} ({language}) in {run_cwd}"})
+
+        # ── Execute subprocess ─────────────────────────────────────────────
+        returncode = 1
+        stdout_text = ""
+        stderr_text = ""
 
         try:
-            await asyncio.wait_for(asyncio.gather(t_out, t_err), timeout=300)
-        except asyncio.TimeoutError:
-            t_out.cancel()
-            t_err.cancel()
-            proc.kill()
-            test_run.status = TestRunStatus.FAILED
-            test_run.error_message = "Test run timed out after 5 minutes"
-            test_run.completed_at = datetime.now(timezone.utc)
-            await db.commit()
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=run_cwd,
+                env=proc_env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _running_processes[run_id] = proc
+
+            stdout_lines: list[str] = []
+            stderr_lines: list[str] = []
+            t_out = asyncio.create_task(_stream_to_logs(proc.stdout, stdout_lines))  # type: ignore[arg-type]
+            t_err = asyncio.create_task(_stream_to_logs(proc.stderr, stderr_lines))  # type: ignore[arg-type]
+
+            try:
+                await asyncio.wait_for(asyncio.gather(t_out, t_err), timeout=300)
+            except asyncio.TimeoutError:
+                t_out.cancel()
+                t_err.cancel()
+                proc.kill()
+                await _broadcast_run(run_id, {"log": f"[warn] {framework} timed out after 5 minutes"})
+                continue
+
+            await proc.wait()
+            returncode = proc.returncode or 0
+            stdout_text = "\n".join(stdout_lines)
+            stderr_text = "\n".join(stderr_lines)
+
+        except Exception as exc:
+            await _broadcast_run(run_id, {"log": f"[error] {framework}: {exc}"})
+            logger.warning("engine: subprocess error for %s: %s", framework, exc)
+            continue
+        finally:
+            _running_processes.pop(run_id, None)
+
+        logger.debug("engine [%s] exit=%s stdout=%s stderr=%s", framework, returncode, stdout_text[:300], stderr_text[:300])
+
+        # ── Parse results per runner framework ─────────────────────────────
+        runner_parsed: list[dict[str, Any]] = []
+
+        if framework == "playwright":
+            runner_parsed = _parse_playwright_output(stdout_text)
+        elif framework == "pytest":
+            for rname in (report_name, ".testforge_report.json", ".report.json", "report.json"):
+                report_file = Path(run_cwd) / rname
+                if report_file.exists():
+                    try:
+                        runner_parsed = _parse_pytest_output(report_file.read_text(encoding="utf-8"))
+                        report_file.unlink(missing_ok=True)
+                        if runner_parsed:
+                            break
+                    except OSError:
+                        pass
+            if not runner_parsed and stdout_text.strip():
+                runner_parsed = _parse_pytest_output(stdout_text)
+        elif framework == "go-test":
+            runner_parsed = _parse_go_test_output(stdout_text)
+        elif framework in ("jest", "vitest"):
+            runner_parsed = _parse_jest_vitest_output(stdout_text, framework=framework)
+
+        # Inject language/framework for results that don't have them
+        for r in runner_parsed:
+            r.setdefault("test_language", language)
+            r.setdefault("test_framework", framework)
+
+        # Fallback: if parsing failed, create a single result
+        if not runner_parsed:
+            status = TestResultStatus.PASSED if returncode == 0 else TestResultStatus.FAILED
+            error_snippet = (stderr_text or stdout_text)[:500].strip()
+            if returncode != 0 and error_snippet:
+                await _broadcast_run(run_id, {"log": f"[test] {framework} exit {returncode}: {error_snippet[:300]}"})
+            runner_parsed = [
+                {
+                    "test_name": f"{framework} run",
+                    "test_file": None,
+                    "test_suite": None,
+                    "test_layer": layer,
+                    "status": status,
+                    "duration_ms": None,
+                    "error_message": error_snippet or None,
+                    "error_stack": (stderr_text or stdout_text) or None,
+                    "test_language": language,
+                    "test_framework": framework,
+                    "error_category": categorize_error(error_snippet, stderr_text),
+                }
+            ]
+        else:
+            n_pass = sum(1 for r in runner_parsed if r["status"] == TestResultStatus.PASSED)
+            n_fail = sum(1 for r in runner_parsed if r["status"] == TestResultStatus.FAILED)
+            n_skip = sum(1 for r in runner_parsed if r["status"] == TestResultStatus.SKIPPED)
             await _broadcast_run(run_id, {
-                "status": "failed", "error_message": test_run.error_message,
+                "log": f"[{framework}] {len(runner_parsed)} collected — ✓{n_pass} ✗{n_fail} ↷{n_skip}"
             })
-            return
+            for r in runner_parsed:
+                if r["status"] == TestResultStatus.FAILED and r.get("error_message"):
+                    await _broadcast_run(run_id, {
+                        "log": f"[fail] {r['test_name']}: {str(r['error_message'])[:200]}"
+                    })
+                    break
 
-        await proc.wait()
-        returncode = proc.returncode or 0
-        stdout_text = "\n".join(stdout_lines)
-        stderr_text = "\n".join(stderr_lines)
-
-    except Exception as exc:
-        test_run.status = TestRunStatus.FAILED
-        test_run.error_message = f"Failed to start test process: {exc}"
-        test_run.completed_at = datetime.now(timezone.utc)
-        await db.commit()
-        await _broadcast_run(run_id, {
-            "status": "failed", "error_message": test_run.error_message,
-        })
-        logger.exception("engine: subprocess error")
-        return
-    finally:
-        _running_processes.pop(run_id, None)
-
-    logger.debug("engine exit=%s stdout=%s stderr=%s", returncode, stdout_text[:500], stderr_text[:500])
-
-    # ── Parse results ─────────────────────────────────────────────────────────
-    if layer == "frontend":
-        parsed = _parse_playwright_output(stdout_text)
-    else:
-        # Primary: read from the JSON report file (written by --json-report-file=...)
-        parsed = []
-        for report_name in (".testforge_report.json", ".report.json", "report.json"):
-            report_file = Path(run_cwd) / report_name
-            if report_file.exists():
-                try:
-                    parsed = _parse_pytest_output(report_file.read_text(encoding="utf-8"))
-                    report_file.unlink(missing_ok=True)  # clean up after reading
-                    if parsed:
-                        break
-                except OSError:
-                    pass
-        # Fallback: try to parse stdout in case the file wasn't written
-        if not parsed and stdout_text.strip():
-            parsed = _parse_pytest_output(stdout_text)
-
-    # Fallback: if parsing failed, create a single result from return code
-    if not parsed:
-        status = TestResultStatus.PASSED if returncode == 0 else TestResultStatus.FAILED
-        # Collect a useful error snippet (prefer stderr, fall back to stdout)
-        error_snippet = (stderr_text or stdout_text)[:500].strip()
-        if returncode != 0 and error_snippet:
-            await _broadcast_run(run_id, {"log": f"[test] Exit {returncode}: {error_snippet[:300]}"})
-        parsed = [
-            {
-                "test_name": "Test Run",
-                "test_file": None,
-                "test_suite": None,
-                "test_layer": layer,
-                "status": status,
-                "duration_ms": None,
-                "error_message": error_snippet or None,
-                "error_stack": (stderr_text or stdout_text) or None,
-            }
-        ]
-    else:
-        # Broadcast a compact result summary
-        n_pass = sum(1 for r in parsed if r["status"] == TestResultStatus.PASSED)
-        n_fail = sum(1 for r in parsed if r["status"] == TestResultStatus.FAILED)
-        n_skip = sum(1 for r in parsed if r["status"] == TestResultStatus.SKIPPED)
-        await _broadcast_run(run_id, {
-            "log": f"[test] {len(parsed)} collected — ✓{n_pass} ✗{n_fail} ↷{n_skip}"
-        })
-        # Broadcast first failed test's error message for quick diagnosis
-        for r in parsed:
-            if r["status"] == TestResultStatus.FAILED and r.get("error_message"):
-                await _broadcast_run(run_id, {
-                    "log": f"[fail] {r['test_name']}: {str(r['error_message'])[:200]}"
-                })
-                break
+        parsed.extend(runner_parsed)
 
     # ── Merge TypeScript/E2E skipped tests into results ──────────────────────
-    # These tests were accepted but cannot run under pytest — they appear in
-    # the results list as "skipped" so the user can see them.
     if ts_skipped:
         parsed.extend(ts_skipped)
+
+    # If no runners produced results (all skipped/failed to start)
+    if not parsed and not ts_skipped:
+        test_run.status = TestRunStatus.FAILED
+        test_run.error_message = "No test runners could execute. Check that test frameworks are installed."
+        test_run.completed_at = datetime.now(timezone.utc)
+        await db.commit()
+        await _broadcast_run(run_id, {"status": "failed", "error_message": test_run.error_message})
+        return
 
     # ── Persist TestResult rows ───────────────────────────────────────────────
     for r in parsed:
@@ -1628,13 +1953,16 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
                 test_name=r["test_name"],
                 test_file=r.get("test_file"),
                 test_suite=r.get("test_suite"),
-                test_layer=r.get("test_layer", layer),
+                test_layer=r.get("test_layer", primary_layer),
                 status=r["status"],
                 duration_ms=r.get("duration_ms"),
                 error_message=r.get("error_message"),
                 error_stack=r.get("error_stack"),
                 screenshot_path=r.get("screenshot_path"),
                 extra_data=r.get("extra_data"),
+                test_language=r.get("test_language"),
+                test_framework=r.get("test_framework"),
+                error_category=r.get("error_category"),
             )
         )
 

@@ -114,6 +114,11 @@ class TestResult(Base, UUIDMixin, TimestampMixin):
     video_path: Mapped[str | None] = mapped_column(String(1000))
     trace_id: Mapped[str | None] = mapped_column(String(36))
 
+    # Language / framework / error classification
+    test_language: Mapped[str | None] = mapped_column(String(20))
+    test_framework: Mapped[str | None] = mapped_column(String(50))
+    error_category: Mapped[str | None] = mapped_column(String(50))
+
     # Extra data
     extra_data: Mapped[dict | None] = mapped_column(JSON)
 
