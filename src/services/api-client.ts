@@ -251,7 +251,7 @@ export interface CreateScheduleInput {
 class ApiClient {
   private static readonly DEFAULT_BASE_URL = 'http://localhost:8001'
 
-  private getBaseUrl(): string {
+  getBaseUrl(): string {
     // In browser dev (same origin as Vite), use proxy to avoid CORS
     if (import.meta.env.DEV && typeof window !== 'undefined' && !window.electronAPI) return ''
     let storeUrl = useAppStore.getState().backendUrl

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { useAppStore } from '@/stores/app-store'
+import { apiClient } from '@/services/api-client'
 
 interface UseWebSocketOptions<T> {
   /** Type of job: 'scan' | 'run' */
@@ -99,8 +99,8 @@ export function useWebSocket<T>({
       return
     }
 
-    // Build WS URL from backend URL
-    const baseUrl = useAppStore.getState().backendUrl || 'http://localhost:8001'
+    // Build WS URL from backend URL (use apiClient to get same 8000→8001 redirect in dev)
+    const baseUrl = apiClient.getBaseUrl() || 'http://localhost:8001'
     const wsUrl = baseUrl
       .replace(/^http:/, 'ws:')
       .replace(/^https:/, 'wss:')

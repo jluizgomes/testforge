@@ -1,7 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiClient, type WorkspaceSyncStatus } from '@/services/api-client'
-import { useAppStore } from '@/stores/app-store'
 
 export type SyncStep = 'idle' | 'scanning' | 'compressing' | 'uploading' | 'done' | 'error'
 
@@ -35,7 +34,7 @@ export function useProjectSync(
   // Tracks whether we've already seeded progress from the persisted status
   const seededFromStatus = useRef(false)
   const queryClient = useQueryClient()
-  const backendUrl = useAppStore.getState().backendUrl || 'http://localhost:8001'
+  const backendUrl = apiClient.getBaseUrl() || 'http://localhost:8001'
 
   const { data: status = null } = useQuery({
     queryKey: ['workspace-status', projectId],

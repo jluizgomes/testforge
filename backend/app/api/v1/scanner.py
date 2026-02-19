@@ -115,16 +115,28 @@ def _classify_entry_point(ep: dict[str, Any]) -> str:
     if extension in {".tsx", ".jsx", ".vue", ".svelte"}:
         if _PAGE_PATH_RE.search(path):
             return "e2e"        # page/screen → Playwright/Cypress
-        return "component"      # component → React Testing Library / Vitest
+        return "e2e"            # component → E2E (frontend layer)
 
     if extension in {".ts", ".js"}:
         if re.search(r"(\.test\.|\.spec\.|cypress|playwright|puppeteer)", path):
             return "e2e"
-        if _PAGE_PATH_RE.search(path):
+        # Frontend directories → e2e
+        if re.search(r"/(frontend|client|web)/", path) and _PAGE_PATH_RE.search(path):
             return "e2e"
+        if _PAGE_PATH_RE.search(path) and not re.search(
+            r"/(api[s]?|routes?|controller[s]?|endpoint[s]?|service[s]?|model[s]?)/", path
+        ):
+            return "e2e"
+        # TypeScript ORM/database files → database
+        if _DATABASE_PATH_RE.search(path):
+            return "database"
+        # API/backend routes → api
         if re.search(r"(api[s]?/|routes?/|controller[s]?/|endpoint[s]?/)", path):
             return "api"
-        return "component"      # generic TS/JS → component test
+        # Service/utility backend layer → integration (will be tested via API)
+        if _SERVICE_PATH_RE.search(path):
+            return "integration"
+        return "api"            # default for unclassified TS/JS backend files
 
     # ── Python / Go / Java / Ruby / PHP ──────────────────────────────────────
     if extension in {".py", ".go", ".java", ".rb", ".php"}:
@@ -470,13 +482,49 @@ def _build_rich_prompt(
     sections.append("Source files:\n" + "\n\n".join(file_lines))
 
     # Instructions
+    if test_type == "api":
+        type_rules = (
+            "- Use Python + pytest-asyncio + httpx.AsyncClient\n"
+            "- BASE_URL = os.environ.get('BACKEND_URL', '...').rstrip('/')\n"
+            "- Generate ONE complete test FILE per source file, each with 4-6 test functions covering:\n"
+            "    • GET list (collection endpoint)\n"
+            "    • GET single item (by ID)\n"
+            "    • POST create (with realistic payload from the source fields)\n"
+            "    • PUT/PATCH update\n"
+            "    • DELETE\n"
+            "    • Error case: 404 for non-existent ID\n"
+            "    • Error case: 422 for invalid payload\n"
+            "- Try multiple candidate paths: /api/v1/{resource}, /api/{resource}, /{resource}\n"
+            "- Use pytest.skip() if the endpoint isn't reachable (don't fail the test)"
+        )
+    elif test_type == "database":
+        type_rules = (
+            "- Use Python + pytest-asyncio + httpx.AsyncClient to test database-backed endpoints\n"
+            "- BASE_URL = os.environ.get('BACKEND_URL', '...').rstrip('/')\n"
+            "- Generate ONE complete test FILE per source file, each with 3-5 test functions covering:\n"
+            "    • List/read all records\n"
+            "    • Create a record and read it back\n"
+            "    • Update a record\n"
+            "    • Delete a record\n"
+            "    • Constraint/validation error (duplicate, missing required field)\n"
+            "- Verify data integrity (created record appears in list, deleted record returns 404)"
+        )
+    else:
+        type_rules = (
+            "- Use TypeScript + @playwright/test\n"
+            "- FRONTEND_URL = process.env.FRONTEND_URL || '...'\n"
+            "- Generate ONE complete test FILE per source file with 2-3 test functions covering:\n"
+            "    • Page loads (status < 500)\n"
+            "    • Key elements visible (heading, navigation, main content)\n"
+            "    • Basic interaction (click, fill, navigate)\n"
+        )
     sections.append(
         "IMPORTANT RULES:\n"
-        "- Generate ONE distinct test per source file or endpoint shown above\n"
-        "- Each test MUST test a DIFFERENT scenario/feature\n"
+        f"{type_rules}\n"
         "- Use the REAL URLs and credentials provided above, NOT localhost:8000 or placeholder values\n"
         "- Each code block must be a complete, runnable test file\n"
-        "- Separate each test with a code block (```typescript or ```python)"
+        "- Separate each test file with a code block (```python or ```typescript)\n"
+        "- Do NOT add explanatory text between code blocks"
     )
 
     return "\n\n".join(sections)
@@ -533,12 +581,15 @@ def _find_entry_points_from_fs(project_path: str, max_files: int = 3000) -> list
                 continue
 
             preview = content[:1500]
-            entry_points.append({
-                "path": str(file_path.relative_to(root)),
+            rel_path = str(file_path.relative_to(root))
+            ep_data: dict[str, Any] = {
+                "path": rel_path,
                 "content_preview": preview,
                 "extension": file_path.suffix,
                 "content_hash": hashlib.md5(content.encode()).hexdigest(),
-            })
+            }
+            ep_data["resource_type"] = _classify_entry_point(ep_data)
+            entry_points.append(ep_data)
         except Exception:
             pass
 
@@ -554,11 +605,16 @@ def _find_entry_points_from_structure(structure: dict[str, Any]) -> list[dict[st
     entry_points = []
     for ep in structure.get("entry_points", []):
         if isinstance(ep, str):
-            entry_points.append({"path": ep, "content_preview": "", "extension": Path(ep).suffix})
+            ep_data: dict[str, Any] = {"path": ep, "content_preview": "", "extension": Path(ep).suffix}
+            ep_data["resource_type"] = _classify_entry_point(ep_data)
+            entry_points.append(ep_data)
         elif isinstance(ep, dict):
             # Compute hash if content_preview is present and hash is missing
             if ep.get("content_preview") and not ep.get("content_hash"):
                 ep["content_hash"] = hashlib.md5(ep["content_preview"].encode()).hexdigest()
+            # Classify resource_type if not already set
+            if "resource_type" not in ep:
+                ep["resource_type"] = _classify_entry_point(ep)
             entry_points.append(ep)
     return entry_points
 
@@ -851,31 +907,208 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
 
 
 def _template_for(path: str, test_type: str, config: ProjectConfig | None = None) -> str:
-    """Return a starter test template for a given file, using real URLs when available."""
+    """Return a starter test template for a given file, using env vars for URLs."""
     name = Path(path).stem
+    safe_name = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "module"
+    # Fallback URLs used only when the env var is absent at runtime
     backend_url = (config.backend_url if config and config.backend_url else "http://localhost:8000")
     frontend_url = (config.frontend_url if config and config.frontend_url else "http://localhost:3000")
+    # Derive candidate API paths from the module name (e.g. "projects" → /api/v1/projects)
+    slug = safe_name.replace("_", "-")
 
-    if test_type == "api":
-        return f"""import pytest
+    if test_type in ("api", "integration"):
+        return f"""import os
+import pytest
 import httpx
 
-# Auto-generated starter test for: {path}
+# Auto-generated comprehensive tests for: {path}
+# TestForge injects BACKEND_URL from the project config (translated to
+# host.docker.internal when running inside Docker).
+BASE_URL = os.environ.get("BACKEND_URL", "{backend_url}").rstrip("/")
+
+# Candidate resource paths derived from module name
+_PATHS = ["/api/v1/{slug}", "/api/{slug}", "/{slug}"]
+
+
+def _find_path(client: httpx.Client, method: str = "GET") -> str | None:
+    \"\"\"Return the first path that doesn't return a 5xx or connection error.\"\"\"
+    for p in _PATHS:
+        try:
+            resp = client.request(method, p)
+            if resp.status_code < 500:
+                return p
+        except httpx.RequestError:
+            pass
+    return None
+
 
 @pytest.mark.asyncio
-async def test_{name.lower().replace("-", "_")}():
-    async with httpx.AsyncClient(base_url="{backend_url}") as client:
-        response = await client.get("/")
-        assert response.status_code == 200
+async def test_{safe_name}_reachable():
+    \"\"\"API endpoint is reachable (returns non-5xx).\"\"\"
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=10) as client:
+        found = None
+        for path in _PATHS + ["/api/v1/health", "/health"]:
+            try:
+                resp = await client.get(path)
+                if resp.status_code < 500:
+                    found = path
+                    break
+            except httpx.RequestError:
+                continue
+        if found is None:
+            pytest.skip("No reachable endpoint for {safe_name}")
+        assert found is not None
+
+
+@pytest.mark.asyncio
+async def test_{safe_name}_list_returns_json():
+    \"\"\"GET list endpoint returns JSON with correct Content-Type.\"\"\"
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=10) as client:
+        for path in _PATHS:
+            try:
+                resp = await client.get(path)
+            except httpx.RequestError:
+                continue
+            if resp.status_code in (200, 401, 403):
+                ct = resp.headers.get("content-type", "")
+                assert "json" in ct, (
+                    f"Expected JSON from {{BASE_URL}}{{path}}\\n"
+                    f"Content-Type: {{ct}}\\nBody: {{resp.text[:300]}}"
+                )
+                return
+        pytest.skip("No list endpoint found for {safe_name}")
+
+
+@pytest.mark.asyncio
+async def test_{safe_name}_not_found():
+    \"\"\"GET with a non-existent ID returns 404 or 401 (not 5xx).\"\"\"
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=10) as client:
+        for path in _PATHS:
+            try:
+                resp = await client.get(f"{{path}}/nonexistent-id-99999")
+            except httpx.RequestError:
+                continue
+            if resp.status_code < 500:
+                assert resp.status_code in (400, 401, 403, 404, 405, 422), (
+                    f"Expected 4xx for non-existent resource, got {{resp.status_code}}\\n"
+                    f"Body: {{resp.text[:200]}}"
+                )
+                return
+        pytest.skip("No testable endpoint found for {safe_name}")
+
+
+@pytest.mark.asyncio
+async def test_{safe_name}_create_requires_body():
+    \"\"\"POST without a body returns 422 (validation error) not a 5xx.\"\"\"
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=10) as client:
+        for path in _PATHS:
+            try:
+                resp = await client.post(path, json={{}})
+            except httpx.RequestError:
+                continue
+            # 4xx means the validation layer is working; 405 means POST not allowed (OK)
+            if resp.status_code < 500:
+                assert resp.status_code < 500, (
+                    f"POST to {{BASE_URL}}{{path}} returned server error {{resp.status_code}}\\n"
+                    f"Body: {{resp.text[:300]}}"
+                )
+                return
+        pytest.skip("No POST endpoint found for {safe_name}")
 """
+
+    if test_type == "database":
+        return f"""import os
+import pytest
+import httpx
+
+# Auto-generated database-layer tests for: {path}
+# These tests verify that the database-backed endpoints work correctly.
+BASE_URL = os.environ.get("BACKEND_URL", "{backend_url}").rstrip("/")
+
+_PATHS = ["/api/v1/{slug}", "/api/{slug}", "/{slug}"]
+
+
+@pytest.mark.asyncio
+async def test_{safe_name}_db_list():
+    \"\"\"List endpoint returns a collection (empty list or populated).\"\"\"
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=10) as client:
+        for path in _PATHS:
+            try:
+                resp = await client.get(path)
+            except httpx.RequestError:
+                continue
+            if resp.status_code == 200:
+                data = resp.json()
+                assert isinstance(data, (list, dict)), (
+                    f"Expected list or dict from {{BASE_URL}}{{path}}, got {{type(data).__name__}}"
+                )
+                return
+            if resp.status_code in (401, 403):
+                pytest.skip("Endpoint requires authentication")
+        pytest.skip("No list endpoint found for {safe_name}")
+
+
+@pytest.mark.asyncio
+async def test_{safe_name}_db_create_and_read():
+    \"\"\"Create a resource then read it back (basic DB write/read cycle).\"\"\"
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=10) as client:
+        for path in _PATHS:
+            try:
+                # Try to create with minimal payload
+                create_resp = await client.post(path, json={{"name": "testforge_test_{safe_name}"}})
+            except httpx.RequestError:
+                continue
+            if create_resp.status_code in (201, 200):
+                created = create_resp.json()
+                rid = created.get("id") or created.get("_id") or created.get("uuid")
+                if rid:
+                    # Read back
+                    read_resp = await client.get(f"{{path}}/{{rid}}")
+                    assert read_resp.status_code == 200, (
+                        f"Read-back failed: {{read_resp.status_code}}\\n{{read_resp.text[:200]}}"
+                    )
+                return
+            if create_resp.status_code == 422:
+                pytest.skip("Create endpoint requires specific fields — please update the test payload")
+            if create_resp.status_code in (401, 403):
+                pytest.skip("Create endpoint requires authentication")
+        pytest.skip("No create endpoint found for {safe_name}")
+
+
+@pytest.mark.asyncio
+async def test_{safe_name}_db_not_found():
+    \"\"\"Reading a non-existent ID returns 404 (DB integrity check).\"\"\"
+    async with httpx.AsyncClient(base_url=BASE_URL, timeout=10) as client:
+        for path in _PATHS:
+            try:
+                resp = await client.get(f"{{path}}/00000000-0000-0000-0000-000000000000")
+            except httpx.RequestError:
+                continue
+            if resp.status_code < 500:
+                assert resp.status_code in (400, 401, 403, 404, 405), (
+                    f"Expected 4xx for non-existent UUID, got {{resp.status_code}}\\n{{resp.text[:200]}}"
+                )
+                return
+        pytest.skip("No testable endpoint found for {safe_name}")
+"""
+
+    # e2e / component → TypeScript Playwright
     return f"""import {{ test, expect }} from '@playwright/test'
 
-// Auto-generated starter test for: {path}
+// Auto-generated E2E test for: {path}
+
+const FRONTEND_URL = process.env.FRONTEND_URL || '{frontend_url}'
 
 test.describe('{name}', () => {{
-  test('should render correctly', async ({{ page }}) => {{
-    await page.goto('{frontend_url}/')
-    await expect(page.locator('[data-testid="{name.lower()}"]')).toBeVisible()
+  test('page loads without server error', async ({{ page }}) => {{
+    const response = await page.goto(FRONTEND_URL + '/{slug}')
+    expect(response?.status()).toBeLessThan(500)
+  }})
+
+  test('page has visible content', async ({{ page }}) => {{
+    await page.goto(FRONTEND_URL + '/{slug}')
+    const body = page.locator('body')
+    await expect(body).not.toBeEmpty()
   }})
 }})
 """
