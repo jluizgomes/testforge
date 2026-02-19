@@ -140,6 +140,13 @@ Context from the codebase:
                     ep_lines.append(line)
                 context_lines.append("Available API endpoints:\n" + "\n".join(ep_lines))
 
+            if pc.get("already_covered_files"):
+                covered = pc["already_covered_files"]
+                context_lines.append(
+                    "Files ALREADY covered by accepted tests (do NOT duplicate):\n"
+                    + "\n".join(f"  {f}" for f in covered[:20])
+                )
+
             if context_lines:
                 user_prompt += f"""
 

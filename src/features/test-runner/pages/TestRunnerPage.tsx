@@ -129,6 +129,15 @@ export function TestRunnerPage() {
   const [screenshotModal, setScreenshotModal] = useState<{
     url: string; name: string; status?: string; layer?: string
   } | null>(null)
+  const [analyzingId, setAnalyzingId] = useState<string | null>(null)
+  const [aiAnalysis, setAiAnalysis] = useState<{ analysis: string; suggestions: string[] } | null>(null)
+  const [lastAnalyzedId, setLastAnalyzedId] = useState<string | null>(null)
+
+  // Reset AI analysis when user selects a different result
+  useEffect(() => {
+    setAiAnalysis(null)
+    setLastAnalyzedId(null)
+  }, [selectedResult?.id])
 
   // Auto-scroll logs
   useEffect(() => {
@@ -172,9 +181,14 @@ export function TestRunnerPage() {
       }
 
       const status = data.status as string | undefined
+      const isTerminal = status === 'passed' || status === 'failed' || status === 'cancelled'
 
-      // Fetch full results from HTTP for both WS and polling
-      if (activeProjectId && activeRunId) {
+      if (data.progress !== undefined) {
+        setProgress(data.progress as number)
+      }
+
+      // Fetch results only when run is finished to avoid flooding (ERR_INSUFFICIENT_RESOURCES)
+      if (isTerminal && activeProjectId && activeRunId) {
         try {
           const items = await apiClient.getTestRunResults(activeProjectId, activeRunId)
           setResults(items)
@@ -183,11 +197,7 @@ export function TestRunnerPage() {
         }
       }
 
-      if (data.progress !== undefined) {
-        setProgress(data.progress as number)
-      }
-
-      if (status === 'passed' || status === 'failed' || status === 'cancelled') {
+      if (isTerminal) {
         // Guard: polling can deliver the terminal status multiple times while
         // React re-renders to stop the interval. Process completion only once.
         if (runFinishedRef.current) return
@@ -573,8 +583,8 @@ export function TestRunnerPage() {
 
             {/* Result detail */}
             <Card className="lg:col-span-3">
-              <CardHeader>
-                <CardTitle className="text-lg">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base leading-snug">
                   {selectedResult ? selectedResult.test_name : 'Select a result'}
                 </CardTitle>
               </CardHeader>
@@ -584,67 +594,208 @@ export function TestRunnerPage() {
                     Click a result on the left to see details.
                   </p>
                 ) : (
-                  <div className="space-y-4">
-                    <div className="flex gap-2 flex-wrap">
-                      <Badge
-                        variant={
-                          selectedResult.status === 'passed'
-                            ? 'success'
-                            : selectedResult.status === 'skipped'
-                              ? 'secondary'
-                              : 'destructive'
-                        }
-                      >
-                        {selectedResult.status}
-                      </Badge>
-                      <Badge variant="outline">{selectedResult.test_layer}</Badge>
-                      {selectedResult.duration_ms && (
-                        <Badge variant="outline">{selectedResult.duration_ms}ms</Badge>
-                      )}
-                      {selectedResult.trace_id && (
-                        <Badge variant="outline" className="font-mono text-xs">
-                          trace: {selectedResult.trace_id.slice(0, 12)}…
-                        </Badge>
-                      )}
-                    </div>
+                  <ScrollArea className="h-[440px] pr-1">
+                    <div className="space-y-4">
 
-                    {selectedResult.error_message && (
-                      <div>
-                        <p className="text-xs font-semibold text-destructive mb-1">Error</p>
-                        <pre className="text-xs bg-zinc-950 text-red-300 p-3 rounded-md overflow-x-auto whitespace-pre-wrap">
-                          {selectedResult.error_message}
-                        </pre>
-                      </div>
-                    )}
-
-                    {selectedResult.error_stack && (
-                      <div>
-                        <p className="text-xs font-semibold text-muted-foreground mb-1">Stack Trace</p>
-                        <pre className="text-xs bg-zinc-950 text-zinc-300 p-3 rounded-md overflow-x-auto h-40">
-                          {selectedResult.error_stack}
-                        </pre>
-                      </div>
-                    )}
-
-                    {selectedResult.screenshot_path && (
-                      <div>
-                        <p className="text-xs font-semibold text-muted-foreground mb-1">Screenshot</p>
-                        <img
-                          src={screenshotUrl(selectedResult.screenshot_path)}
-                          alt="Test screenshot"
-                          className="rounded-md border max-h-48 object-contain cursor-pointer hover:opacity-80 transition-opacity"
-                          onClick={() =>
-                            setScreenshotModal({
-                              url: screenshotUrl(selectedResult.screenshot_path!),
-                              name: selectedResult.test_name,
-                              status: selectedResult.status,
-                              layer: selectedResult.test_layer,
-                            })
+                      {/* Status badges */}
+                      <div className="flex gap-2 flex-wrap">
+                        <Badge
+                          variant={
+                            selectedResult.status === 'passed'
+                              ? 'success'
+                              : selectedResult.status === 'skipped'
+                                ? 'secondary'
+                                : 'destructive'
                           }
-                        />
+                        >
+                          {selectedResult.status}
+                        </Badge>
+                        <Badge variant="outline">{selectedResult.test_layer}</Badge>
+                        {selectedResult.duration_ms != null && (
+                          <Badge variant="outline">{selectedResult.duration_ms}ms</Badge>
+                        )}
+                        {selectedResult.trace_id && (
+                          <Badge variant="outline" className="font-mono text-xs">
+                            trace: {selectedResult.trace_id.slice(0, 12)}…
+                          </Badge>
+                        )}
                       </div>
-                    )}
-                  </div>
+
+                      {/* File + suite info */}
+                      {(selectedResult.test_file || selectedResult.test_suite) && (
+                        <div className="space-y-1">
+                          {selectedResult.test_file && (
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <Code2 className="h-3.5 w-3.5 flex-shrink-0" />
+                              <span className="font-mono truncate" title={selectedResult.test_file}>
+                                {selectedResult.test_file.split('/').slice(-2).join('/')}
+                              </span>
+                            </div>
+                          )}
+                          {selectedResult.test_suite && (
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <Globe className="h-3.5 w-3.5 flex-shrink-0" />
+                              <span>Suite: <span className="font-medium text-foreground">{selectedResult.test_suite}</span></span>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                            <Clock className="h-3.5 w-3.5 flex-shrink-0" />
+                            <span>{new Date(selectedResult.created_at).toLocaleString()}</span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Error message */}
+                      {selectedResult.error_message && (
+                        <div>
+                          <p className="text-xs font-semibold text-destructive mb-1">Error</p>
+                          <pre className="text-xs bg-zinc-950 text-red-300 p-3 rounded-md overflow-x-auto whitespace-pre-wrap">
+                            {selectedResult.error_message}
+                          </pre>
+                        </div>
+                      )}
+
+                      {/* Stack trace */}
+                      {selectedResult.error_stack && (
+                        <div>
+                          <p className="text-xs font-semibold text-muted-foreground mb-1">Stack Trace</p>
+                          <pre className="text-xs bg-zinc-950 text-zinc-300 p-3 rounded-md overflow-x-auto max-h-40">
+                            {selectedResult.error_stack}
+                          </pre>
+                        </div>
+                      )}
+
+                      {/* AI Analyze button (for failures) */}
+                      {(selectedResult.status === 'failed' || selectedResult.status === 'error') && (
+                        <div className="space-y-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={analyzingId === selectedResult.id}
+                            onClick={async () => {
+                              setAnalyzingId(selectedResult.id)
+                              setAiAnalysis(null)
+                              try {
+                                const res = await apiClient.analyzeFailure(
+                                  selectedResult.test_run_id,
+                                  selectedResult.id,
+                                )
+                                setAiAnalysis(res)
+                                setLastAnalyzedId(selectedResult.id)
+                              } catch {
+                                setAiAnalysis({
+                                  analysis: 'Analysis failed — check AI/Ollama settings.',
+                                  suggestions: [],
+                                })
+                                setLastAnalyzedId(selectedResult.id)
+                              } finally {
+                                setAnalyzingId(null)
+                              }
+                            }}
+                          >
+                            {analyzingId === selectedResult.id ? (
+                              <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />Analyzing…</>
+                            ) : (
+                              <>🤖 Analyze with AI</>
+                            )}
+                          </Button>
+
+                          {aiAnalysis && lastAnalyzedId === selectedResult.id && (
+                            <div className="space-y-2">
+                              <div className="text-xs bg-blue-950/40 border border-blue-900/40 rounded-md p-3">
+                                <p className="font-semibold text-blue-400 mb-1">AI Analysis</p>
+                                <p className="text-blue-100 whitespace-pre-wrap">{aiAnalysis.analysis}</p>
+                              </div>
+                              {aiAnalysis.suggestions.length > 0 && (
+                                <div className="text-xs bg-zinc-900 border rounded-md p-3">
+                                  <p className="font-semibold text-muted-foreground mb-1">Suggestions</p>
+                                  <ul className="space-y-1">
+                                    {aiAnalysis.suggestions.map((s, i) => (
+                                      <li key={i} className="text-zinc-300">• {s}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Screenshot thumbnail */}
+                      {selectedResult.screenshot_path && (
+                        <div>
+                          <p className="text-xs font-semibold text-muted-foreground mb-1">Screenshot</p>
+                          <img
+                            src={screenshotUrl(selectedResult.screenshot_path)}
+                            alt="Test screenshot"
+                            className="rounded-md border max-h-48 object-contain cursor-pointer hover:opacity-80 transition-opacity"
+                            onClick={() =>
+                              setScreenshotModal({
+                                url: screenshotUrl(selectedResult.screenshot_path!),
+                                name: selectedResult.test_name,
+                                status: selectedResult.status,
+                                layer: selectedResult.test_layer,
+                              })
+                            }
+                          />
+                        </div>
+                      )}
+
+                      {/* Inline network requests (top 5) */}
+                      {(selectedResult.metadata?.network_requests ?? []).length > 0 && (
+                        <div>
+                          <p className="text-xs font-semibold text-muted-foreground mb-1">
+                            Network Requests ({selectedResult.metadata!.network_requests!.length})
+                          </p>
+                          <div className="space-y-1">
+                            {selectedResult.metadata!.network_requests!.slice(0, 5).map((req, i) => (
+                              <div key={i} className="flex items-center gap-2 text-xs font-mono">
+                                <span className={cn(
+                                  'font-bold w-12 flex-shrink-0',
+                                  req.method === 'GET' && 'text-blue-400',
+                                  req.method === 'POST' && 'text-green-400',
+                                  req.method === 'PUT' && 'text-yellow-400',
+                                  req.method === 'DELETE' && 'text-red-400',
+                                )}>
+                                  {req.method}
+                                </span>
+                                <span className={cn(
+                                  'font-semibold w-8 flex-shrink-0',
+                                  req.status && req.status < 400 ? 'text-green-400' : 'text-red-400',
+                                )}>
+                                  {req.status ?? '—'}
+                                </span>
+                                <span className="text-zinc-400 truncate">{req.url}</span>
+                              </div>
+                            ))}
+                            {selectedResult.metadata!.network_requests!.length > 5 && (
+                              <p className="text-xs text-muted-foreground">
+                                +{selectedResult.metadata!.network_requests!.length - 5} more (see Network tab)
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Extra metadata (non-network fields) */}
+                      {selectedResult.metadata &&
+                        Object.keys(selectedResult.metadata).filter((k) => k !== 'network_requests').length > 0 && (
+                          <div>
+                            <p className="text-xs font-semibold text-muted-foreground mb-1">Metadata</p>
+                            <div className="text-xs bg-zinc-950 rounded-md p-3 space-y-1 font-mono">
+                              {Object.entries(selectedResult.metadata)
+                                .filter(([k]) => k !== 'network_requests')
+                                .map(([k, v]) => (
+                                  <div key={k} className="flex gap-2">
+                                    <span className="text-zinc-400 min-w-[100px] flex-shrink-0">{k}:</span>
+                                    <span className="text-zinc-200 truncate">{String(v)}</span>
+                                  </div>
+                                ))}
+                            </div>
+                          </div>
+                        )}
+                    </div>
+                  </ScrollArea>
                 )}
               </CardContent>
             </Card>
@@ -665,7 +816,10 @@ export function TestRunnerPage() {
                 <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-2">
                   <Image className="h-10 w-10 opacity-30" />
                   <p className="text-sm">No screenshots captured yet</p>
-                  <p className="text-xs">Screenshots are taken automatically on test failure</p>
+                  <p className="text-xs text-center max-w-xs">
+                    Screenshots are captured automatically on failure during Playwright E2E test runs.
+                    Backend/pytest tests do not generate screenshots.
+                  </p>
                 </div>
               ) : (
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
@@ -718,7 +872,10 @@ export function TestRunnerPage() {
                 <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-2">
                   <Globe className="h-10 w-10 opacity-30" />
                   <p className="text-sm">No network requests captured yet</p>
-                  <p className="text-xs">Requests are captured during test execution</p>
+                  <p className="text-xs text-center max-w-xs">
+                    HTTP requests are captured during Playwright E2E test execution.
+                    Backend/pytest tests use direct HTTP calls that are not intercepted here.
+                  </p>
                 </div>
               ) : (
                 <ScrollArea className="h-[480px]">

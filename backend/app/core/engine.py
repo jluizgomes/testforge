@@ -165,9 +165,20 @@ def _get_effective_path(project_id: str, project_path: str) -> str:
     return _translate_path(project_path)
 
 
+# Bump this when the essentials list in _ensure_project_venv changes.
+# Changing the version invalidates all existing venv hashes so the next
+# test run rebuilds them with the new packages (e.g. pytest-playwright).
+_ESSENTIALS_VERSION = "v2"
+
+
 def _req_hash(workspace_path: Path) -> str:
-    """MD5 fingerprint of all requirements files found in *workspace_path*."""
+    """MD5 fingerprint of all requirements files found in *workspace_path*.
+
+    Also incorporates the essentials version so adding/removing packages
+    from the essentials list forces all per-project venvs to rebuild.
+    """
     h = hashlib.md5()
+    h.update(f"essentials:{_ESSENTIALS_VERSION}".encode())
     for fname in (
         "requirements.txt",
         "requirements-dev.txt",
@@ -337,8 +348,11 @@ async def _ensure_project_venv(
 
     # Phase 1: pytest essentials — always installed, very fast (~5–10s).
     # httpx is included because starlette.testclient (used by FastAPI tests) requires it.
+    # pytest-playwright provides the `page` fixture for E2E tests — Playwright browsers
+    # are already installed system-wide in the Docker image (playwright install chromium).
     essentials = [
         "pytest", "pytest-asyncio", "pytest-json-report", "anyio[asyncio]", "httpx",
+        "pytest-playwright",  # E2E tests via Python Playwright (page fixture + screenshots)
         "uv",  # install uv so Phase 2 can use it (10-100x faster than pip)
     ]
     phase1_ok, _ = await _stream_install_cmd(
@@ -493,7 +507,12 @@ def _detect_runner(
         for root in search_dirs:
             for cfg in playwright_configs:
                 if (root / cfg).exists():
-                    cmd = [npx, "playwright", "test", "--reporter=json"]
+                    cmd = [
+                        npx, "playwright", "test",
+                        "--reporter=json",
+                        "--screenshot=only-on-failure",
+                        "--output=/app/screenshots/pw-results",
+                    ]
                     if parallel_workers > 1:
                         cmd += [f"--workers={parallel_workers}"]
                     if retry_count > 0:
@@ -513,7 +532,12 @@ def _detect_runner(
                     except ValueError:
                         continue
                     root = path.parent
-                    cmd = [npx, "playwright", "test", "--reporter=json"]
+                    cmd = [
+                        npx, "playwright", "test",
+                        "--reporter=json",
+                        "--screenshot=only-on-failure",
+                        "--output=/app/screenshots/pw-results",
+                    ]
                     if parallel_workers > 1:
                         cmd += [f"--workers={parallel_workers}"]
                     if retry_count > 0:
@@ -563,10 +587,13 @@ def _detect_runner(
                 # The file is read after the subprocess exits and then removed.
                 _json_report_arg = "--json-report-file=.testforge_report.json"
                 # If pytest_bin contains a space (the "-m pytest" fallback), split it
+                # -p no:base_url — disable pytest-base-url plugin (bundled with
+                # pytest-playwright) to prevent ScopeMismatch when the project
+                # defines its own `base_url` fixture with function scope.
                 if " " in pytest_bin:
-                    cmd = pytest_bin.split() + ["--json-report", _json_report_arg, "-v"]
+                    cmd = pytest_bin.split() + ["--json-report", _json_report_arg, "-v", "-p", "no:base_url"]
                 else:
-                    cmd = [pytest_bin, "--json-report", _json_report_arg, "-v"]
+                    cmd = [pytest_bin, "--json-report", _json_report_arg, "-v", "-p", "no:base_url"]
                 if parallel_workers > 1:
                     cmd += ["-n", str(parallel_workers)]
                 if retry_count > 0:
@@ -649,6 +676,29 @@ def _parse_playwright_output(raw: str) -> list[dict[str, Any]]:
                     }.get(status_raw, TestResultStatus.ERROR)
 
                     error = attempt.get("error", {})
+
+                    # Extract screenshot from attachments
+                    screenshot_path: str | None = None
+                    for att in attempt.get("attachments", []):
+                        att_name = att.get("name", "")
+                        att_path = att.get("path", "")
+                        if att_name == "screenshot" and att_path:
+                            # Copy to /app/screenshots/ so the API can serve it
+                            src = Path(att_path)
+                            if src.exists():
+                                dst_dir = Path("/app/screenshots")
+                                dst_dir.mkdir(parents=True, exist_ok=True)
+                                safe_name = spec_title.replace(" ", "_").replace("/", "_")[:80]
+                                dst = dst_dir / f"pw_{safe_name}.png"
+                                try:
+                                    shutil.copy2(str(src), str(dst))
+                                    screenshot_path = str(dst)
+                                except OSError:
+                                    screenshot_path = att_path
+                            else:
+                                screenshot_path = att_path
+                            break
+
                     results.append(
                         {
                             "test_name": spec_title,
@@ -659,6 +709,7 @@ def _parse_playwright_output(raw: str) -> list[dict[str, Any]]:
                             "duration_ms": attempt.get("duration", 0),
                             "error_message": error.get("message") if error else None,
                             "error_stack": error.get("stack") if error else None,
+                            "screenshot_path": screenshot_path,
                         }
                     )
 
@@ -708,16 +759,47 @@ def _parse_pytest_output(raw: str) -> list[dict[str, Any]]:
         }.get(outcome, TestResultStatus.ERROR)
 
         longrepr = t.get("longrepr") or ""
+
+        # Tests inside tests/testforge/e2e/ are frontend (Playwright) tests
+        is_e2e = "/testforge/e2e/" in file_path or "\\testforge\\e2e\\" in file_path
+        layer = "frontend" if is_e2e else "backend"
+
+        # Look for sentinels printed by the testforge conftest fixture:
+        # "[testforge:screenshot]/app/screenshots/tf_test_name.png"
+        # "[testforge:network]/app/network_captures/tf_test_name.json"
+        screenshot_path: str | None = None
+        network_requests: list[dict[str, Any]] | None = None
+        call_stdout = (t.get("call") or {}).get("stdout") or ""
+        for line in call_stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("[testforge:screenshot]"):
+                candidate = stripped[len("[testforge:screenshot]"):].strip()
+                if candidate:
+                    screenshot_path = candidate
+            elif stripped.startswith("[testforge:network]"):
+                net_path = stripped[len("[testforge:network]"):].strip()
+                if net_path:
+                    try:
+                        network_requests = json.loads(Path(net_path).read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        pass
+
+        extra_data: dict[str, Any] | None = None
+        if network_requests:
+            extra_data = {"network_requests": network_requests}
+
         results.append(
             {
                 "test_name": test_name,
                 "test_file": file_path,
                 "test_suite": suite,
-                "test_layer": "backend",
+                "test_layer": layer,
                 "status": status,
                 "duration_ms": int(t.get("duration", 0) * 1000),
                 "error_message": str(longrepr)[:500] if longrepr else None,
                 "error_stack": str(longrepr) if longrepr else None,
+                "screenshot_path": screenshot_path,
+                "extra_data": extra_data,
             }
         )
     return results
@@ -803,6 +885,54 @@ def _patch_hardcoded_urls(code: str) -> str:
     return patched
 
 
+def _auto_python_e2e(entry_point: str | None, test_name: str) -> str:
+    """Generate a Python pytest-playwright E2E test from a TypeScript accepted test.
+
+    Used when the user accepted a TypeScript E2E test before the scanner was
+    updated to generate Python tests.  We create a runnable Python equivalent
+    so the test actually executes (with screenshot capture on failure) rather
+    than appearing as a permanent "skipped" entry in the results.
+    """
+    path = entry_point or test_name
+    name = Path(path).stem
+    safe = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "page"
+    slug = re.sub(r"[^a-z0-9/]+", "-", name.lower()).strip("-")
+    return f'''"""Auto-generated Python E2E test — source: {path}"""
+import os
+
+import pytest
+from playwright.sync_api import Page, expect
+
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+_PAGE_PATH = "/{slug}"
+_TIMEOUT_MS = int(os.environ.get("PLAYWRIGHT_TIMEOUT_MS", "10000"))
+
+
+def test_{safe}_page_loads(page: Page) -> None:
+    """Page responds without a server error (HTTP < 500)."""
+    try:
+        response = page.goto(FRONTEND_URL + _PAGE_PATH, timeout=_TIMEOUT_MS)
+    except Exception as exc:
+        pytest.skip(f"Could not reach frontend: {{exc!s}}")
+    if response is None:
+        pytest.skip("Could not reach frontend — is it running?")
+    if response.status >= 500:
+        pytest.fail(
+            f"Page {{FRONTEND_URL}}{{_PAGE_PATH}} returned HTTP {{response.status}}"
+        )
+
+
+def test_{safe}_has_content(page: Page) -> None:
+    """Page renders visible content after network-idle."""
+    try:
+        page.goto(FRONTEND_URL + _PAGE_PATH, timeout=_TIMEOUT_MS)
+    except Exception as exc:
+        pytest.skip(f"Could not reach frontend: {{exc!s}}")
+    page.wait_for_load_state("networkidle", timeout=_TIMEOUT_MS)
+    expect(page.locator("body")).to_be_visible()
+'''
+
+
 def _is_python_test_code(code: str) -> bool:
     """Return True only if the code looks like Python (not TypeScript/JavaScript).
 
@@ -828,13 +958,15 @@ async def _write_accepted_tests_to_workspace(
     project_id: str,
     run_cwd: str,
     run_id: str,
-) -> tuple[int, int, int]:
+) -> tuple[int, list[dict[str, Any]], int]:
     """Write accepted GeneratedTest records to tests/testforge/ in the workspace.
 
     Only Python tests are written — TypeScript/Playwright tests require npx
     which is not available in the Docker image.  We detect language from the
     code itself (not just test_type) because the scanner sometimes mis-classifies.
-    Returns (written, skipped_ts, skipped_syntax).
+    Returns (written, ts_skipped_dicts, skipped_syntax).
+    ts_skipped_dicts are pre-built result dicts (status=SKIPPED) to be merged
+    into the parsed results so TypeScript tests appear in the results list.
     """
     from app.models.scanner import GeneratedTest  # lazy import to avoid circular deps
 
@@ -847,27 +979,153 @@ async def _write_accepted_tests_to_workspace(
     tests = result.scalars().all()
 
     if not tests:
-        return 0, 0, 0
+        return 0, [], 0
 
     testforge_dir = Path(run_cwd) / "tests" / "testforge"
     testforge_dir.mkdir(parents=True, exist_ok=True)
 
+    # Subdirectory for E2E/Playwright tests — separate layer detection via path prefix
+    e2e_dir = testforge_dir / "e2e"
+    e2e_dir.mkdir(parents=True, exist_ok=True)
+
     # Clear previously written test files so rejected/deleted tests don't linger
     for old_file in testforge_dir.glob("test_*.py"):
         old_file.unlink(missing_ok=True)
+    for old_file in e2e_dir.glob("test_*.py"):
+        old_file.unlink(missing_ok=True)
 
-    init_file = testforge_dir / "__init__.py"
-    if not init_file.exists():
-        init_file.write_text("# Auto-generated by TestForge\n")
+    # Write __init__.py so pytest discovers both directories
+    for d in (testforge_dir, e2e_dir):
+        init_file = d / "__init__.py"
+        if not init_file.exists():
+            init_file.write_text("# Auto-generated by TestForge\n")
+
+    # Write conftest.py with:
+    # 1. TCP reachability check — skip ALL E2E tests instantly if frontend is down
+    # 2. Playwright page timeout configuration (10s instead of default 30s)
+    # 3. Screenshot-on-failure capture with sentinel for _parse_pytest_output()
+    # 4. Network request capture with sentinel for _parse_pytest_output()
+    conftest_path = e2e_dir / "conftest.py"
+    conftest_path.write_text(
+        '"""Auto-generated TestForge conftest for E2E tests."""\n'
+        "from __future__ import annotations\n\n"
+        "import json\n"
+        "import os\n"
+        "import socket\n"
+        "from datetime import datetime, timezone\n"
+        "from pathlib import Path\n"
+        "from urllib.parse import urlparse\n\n"
+        "import pytest\n\n"
+        'SCREENSHOT_DIR = Path("/app/screenshots")\n'
+        "SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)\n\n"
+        'NETWORK_DIR = Path("/app/network_captures")\n'
+        "NETWORK_DIR.mkdir(parents=True, exist_ok=True)\n\n"
+        'FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000").rstrip("/")\n'
+        '_PLAYWRIGHT_TIMEOUT_MS = int(os.environ.get("PLAYWRIGHT_TIMEOUT_MS", "10000"))\n'
+        "_FRONTEND_REACHABLE: bool | None = None\n\n\n"
+        "def _check_frontend_tcp() -> bool:\n"
+        '    """Quick TCP socket check — avoids 30s Playwright timeout per test."""\n'
+        "    try:\n"
+        "        p = urlparse(FRONTEND_URL)\n"
+        '        host = p.hostname or "localhost"\n'
+        '        port = p.port or (443 if p.scheme == "https" else 80)\n'
+        "        with socket.create_connection((host, port), timeout=5):\n"
+        "            return True\n"
+        "    except Exception:\n"
+        "        return False\n\n\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def _require_frontend():\n"
+        '    """Skip all E2E tests instantly when frontend is not reachable (cached TCP check)."""\n'
+        "    global _FRONTEND_REACHABLE\n"
+        "    if _FRONTEND_REACHABLE is None:\n"
+        "        _FRONTEND_REACHABLE = _check_frontend_tcp()\n"
+        "    if not _FRONTEND_REACHABLE:\n"
+        '        pytest.skip(f"Frontend not reachable at {FRONTEND_URL} — skipping E2E")\n\n\n'
+        "@pytest.hookimpl(hookwrapper=True)\n"
+        "def pytest_runtest_makereport(item, call):\n"
+        '    """Store test outcome so screenshot fixture knows if the test failed."""\n'
+        "    outcome = yield\n"
+        "    report = outcome.get_result()\n"
+        '    if report.when == "call":\n'
+        "        item.testforge_failed = report.failed\n\n\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def _testforge_capture(request):\n"
+        '    """Set Playwright timeout, capture network + screenshot on failure."""\n'
+        "    network_requests: list[dict] = []\n"
+        '    page = request.node.funcargs.get("page")\n'
+        "    if page is not None:\n"
+        "        page.set_default_timeout(_PLAYWRIGHT_TIMEOUT_MS)\n"
+        "        page.set_default_navigation_timeout(_PLAYWRIGHT_TIMEOUT_MS)\n\n"
+        "        def _on_request(req):\n"
+        "            network_requests.append({\n"
+        '                "url": req.url,\n'
+        '                "method": req.method,\n'
+        '                "resource_type": req.resource_type,\n'
+        '                "timestamp": datetime.now(timezone.utc).isoformat(),\n'
+        "            })\n\n"
+        "        def _on_response(resp):\n"
+        "            for entry in reversed(network_requests):\n"
+        '                if entry.get("url") == resp.url:\n'
+        '                    entry["status"] = resp.status\n'
+        '                    entry["content_type"] = resp.headers.get("content-type", "")\n'
+        "                    break\n\n"
+        '        page.on("request", _on_request)\n'
+        '        page.on("response", _on_response)\n\n'
+        "    yield\n\n"
+        '    test_name = request.node.name.replace(" ", "_").replace("/", "_")[:80]\n\n'
+        "    # Always output network data (even for passing tests)\n"
+        "    if network_requests:\n"
+        '        net_file = NETWORK_DIR / f"tf_{test_name}.json"\n'
+        "        net_file.write_text(json.dumps(network_requests, default=str))\n"
+        '        print(f"\\n[testforge:network]{net_file}", flush=True)\n\n'
+        "    # Screenshot on failure only\n"
+        '    if getattr(request.node, "testforge_failed", False) and page is not None:\n'
+        '        path = SCREENSHOT_DIR / f"tf_{test_name}.png"\n'
+        "        try:\n"
+        "            page.screenshot(path=str(path), full_page=True)\n"
+        '            print(f"\\n[testforge:screenshot]{path}", flush=True)\n'
+        "        except Exception:\n"
+        "            pass\n",
+        encoding="utf-8",
+    )
 
     written = 0
-    skipped_ts = 0
+    ts_skipped: list[dict[str, Any]] = []
     skipped_syntax = 0
     for test in tests:
         if not _is_python_test_code(test.test_code):
-            skipped_ts += 1
+            is_e2e_type = test.test_type in ("e2e", "component")
+            if is_e2e_type:
+                # Auto-convert TypeScript E2E → Python pytest-playwright so the test
+                # actually runs in Docker (Playwright Python is pre-installed) and
+                # captures screenshots on failure.
+                python_code = _auto_python_e2e(test.entry_point, test.test_name)
+                safe_name = re.sub(r"[^a-z0-9]+", "_", test.test_name.lower()).strip("_") or "test"
+                uid = str(test.id).replace("-", "")[:8]
+                e2e_path = e2e_dir / f"test_{safe_name}_{uid}.py"
+                try:
+                    e2e_path.write_text(python_code, encoding="utf-8")
+                    written += 1
+                    logger.debug(
+                        "engine: auto-converted TypeScript E2E test %s → Python", test.id
+                    )
+                except OSError as exc:
+                    logger.warning("engine: could not write E2E test %s: %s", test.id, exc)
+                continue  # handled — do not add to ts_skipped
+
+            # Non-E2E TypeScript (e.g. API tests written in TS) — truly can't run
+            ts_skipped.append({
+                "test_name": test.test_name,
+                "test_file": test.entry_point,
+                "test_suite": "TypeScript (non-E2E)",
+                "test_layer": "backend",
+                "status": TestResultStatus.SKIPPED,
+                "duration_ms": None,
+                "error_message": "TypeScript test not executed — requires Node.js/npx runner",
+                "error_stack": None,
+            })
             logger.debug(
-                "engine: skipping non-Python test %s (%s) — TypeScript/E2E",
+                "engine: skipping non-Python non-E2E test %s (%s)",
                 test.id, test.test_name,
             )
             continue
@@ -887,7 +1145,10 @@ async def _write_accepted_tests_to_workspace(
         safe_name = re.sub(r"[^a-z0-9]+", "_", test.test_name.lower()).strip("_") or "test"
         uid = str(test.id).replace("-", "")[:8]
         filename = f"test_{safe_name}_{uid}.py"
-        filepath = testforge_dir / filename
+
+        # E2E tests go to the e2e/ subdir so the parser assigns the frontend layer
+        is_e2e = test.test_type in ("e2e", "component")
+        filepath = (e2e_dir if is_e2e else testforge_dir) / filename
 
         # Patch legacy tests that have a hardcoded base_url string literal:
         # Replace  base_url="http://..."  with  base_url=os.environ.get("BACKEND_URL","http://...")
@@ -904,9 +1165,122 @@ async def _write_accepted_tests_to_workspace(
 
     logger.info(
         "engine: wrote %d Python test files for project %s (%d TS/E2E skipped, %d syntax errors)",
-        written, project_id, skipped_ts, skipped_syntax,
+        written, project_id, len(ts_skipped), skipped_syntax,
     )
-    return written, skipped_ts, skipped_syntax
+    return written, ts_skipped, skipped_syntax
+
+
+def _inject_testforge_conftest(run_cwd: str) -> None:
+    """Write a root-level conftest.py that captures screenshots + network on failure.
+
+    The conftest is non-invasive: the autouse fixture only activates its
+    Playwright hooks when a ``page`` fixture is present in the test.  For
+    non-Playwright tests it simply yields and does nothing.
+
+    Sentinels printed to stdout:
+    - ``[testforge:screenshot]/app/screenshots/tf_<name>.png``
+    - ``[testforge:network]/app/network_captures/tf_<name>.json``
+
+    These are parsed by :func:`_parse_pytest_output` to populate the
+    Screenshots and Network tabs in the frontend.
+    """
+    conftest_code = '''\
+"""TestForge root conftest — screenshot + network capture for Playwright tests."""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+SCREENSHOT_DIR = Path("/app/screenshots")
+SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+NETWORK_DIR = Path("/app/network_captures")
+NETWORK_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def pytest_runtest_makereport(item, call):
+    """Store call-phase outcome so the capture fixture can read it."""
+    if call.when == "call":
+        item.testforge_failed = call.excinfo is not None
+
+
+@pytest.fixture(autouse=True)
+def _testforge_capture(request):
+    """Capture screenshot + network on failure for Playwright tests."""
+    network_requests: list[dict] = []
+    page = None
+
+    # Only hook into Playwright if the test uses a `page` fixture
+    if "page" in request.fixturenames:
+        page = request.getfixturevalue("page")
+
+        def _on_request(req):
+            network_requests.append({
+                "url": req.url,
+                "method": req.method,
+                "resource_type": req.resource_type,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+        def _on_response(resp):
+            # Match last request with same URL to attach status
+            for entry in reversed(network_requests):
+                if entry.get("url") == resp.url:
+                    entry["status"] = resp.status
+                    entry["content_type"] = resp.headers.get("content-type", "")
+                    break
+
+        page.on("request", _on_request)
+        page.on("response", _on_response)
+
+    yield
+
+    test_name = request.node.name.replace(" ", "_").replace("/", "_")[:80]
+
+    # Always output network data (even for passing tests)
+    if network_requests:
+        net_file = NETWORK_DIR / f"tf_{test_name}.json"
+        net_file.write_text(json.dumps(network_requests, default=str))
+        print(f"\\n[testforge:network]{net_file}", flush=True)
+
+    # Screenshot on failure only
+    if getattr(request.node, "testforge_failed", False) and page:
+        path = SCREENSHOT_DIR / f"tf_{test_name}.png"
+        try:
+            page.screenshot(path=str(path), full_page=True)
+            print(f"\\n[testforge:screenshot]{path}", flush=True)
+        except Exception:
+            pass
+'''
+    conftest_path = Path(run_cwd) / "conftest.py"
+
+    # Don't overwrite an existing conftest that the project itself owns.
+    # If the project has its own conftest, write ours as a separate file
+    # and import it from the existing conftest.
+    _MARKER = "# testforge-injected-conftest"
+    if conftest_path.exists():
+        try:
+            existing = conftest_path.read_text(encoding="utf-8")
+            if _MARKER not in existing:
+                # Project has its own conftest — write ours as a plugin instead
+                plugin_path = Path(run_cwd) / "conftest_testforge.py"
+                plugin_path.write_text(f"{_MARKER}\n{conftest_code}", encoding="utf-8")
+                # Prepend an import of our plugin into the existing conftest
+                if "conftest_testforge" not in existing:
+                    conftest_path.write_text(
+                        f"import conftest_testforge  # noqa: F401  {_MARKER}\n{existing}",
+                        encoding="utf-8",
+                    )
+                logger.info("engine: injected testforge conftest as plugin at %s", plugin_path)
+                return
+        except OSError:
+            pass
+
+    conftest_path.write_text(f"{_MARKER}\n{conftest_code}", encoding="utf-8")
+    logger.info("engine: wrote testforge conftest at %s", conftest_path)
 
 
 async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
@@ -1081,17 +1455,28 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
     # Tests accepted by the user in the Scanner view are stored in the DB as
     # GeneratedTest records. Before each pytest run, write them into
     # tests/testforge/ inside the workspace so pytest discovers them.
+    ts_skipped: list[dict[str, Any]] = []
     if layer == "backend" and is_workspace:
-        written, skipped_ts, skipped_syntax = await _write_accepted_tests_to_workspace(
+        written, ts_skipped, skipped_syntax = await _write_accepted_tests_to_workspace(
             db, project_id, run_cwd, run_id
         )
-        if written or skipped_ts or skipped_syntax:
+        if written or ts_skipped or skipped_syntax:
             parts = [f"[testforge] {written} Python test file(s) loaded"]
-            if skipped_ts:
-                parts.append(f"{skipped_ts} TypeScript/E2E skipped (need Playwright runner)")
+            if ts_skipped:
+                parts.append(f"{len(ts_skipped)} TypeScript/E2E skipped (need Playwright runner)")
             if skipped_syntax:
                 parts.append(f"{skipped_syntax} skipped (syntax error)")
             await _broadcast_run(run_id, {"log": " · ".join(parts)})
+
+    # ── Inject testforge conftest for screenshot + network capture ────────────
+    # For ALL pytest (backend) runs, inject a root-level conftest.py that
+    # captures screenshots on failure and records network requests for
+    # Playwright-based tests.  Non-Playwright tests are unaffected.
+    if layer == "backend":
+        try:
+            _inject_testforge_conftest(run_cwd)
+        except Exception as exc:
+            logger.warning("engine: could not inject testforge conftest: %s", exc)
 
     # ── Concurrency guard ─────────────────────────────────────────────────────
     if len(_running_processes) >= MAX_CONCURRENT_RUNS:
@@ -1228,6 +1613,12 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
                 })
                 break
 
+    # ── Merge TypeScript/E2E skipped tests into results ──────────────────────
+    # These tests were accepted but cannot run under pytest — they appear in
+    # the results list as "skipped" so the user can see them.
+    if ts_skipped:
+        parsed.extend(ts_skipped)
+
     # ── Persist TestResult rows ───────────────────────────────────────────────
     for r in parsed:
         db.add(
@@ -1242,6 +1633,8 @@ async def _execute(db: AsyncSession, project_id: str, run_id: str) -> None:
                 duration_ms=r.get("duration_ms"),
                 error_message=r.get("error_message"),
                 error_stack=r.get("error_stack"),
+                screenshot_path=r.get("screenshot_path"),
+                extra_data=r.get("extra_data"),
             )
         )
 

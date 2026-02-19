@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.main import app
+from app.main import _fastapi_app
 
 
 @pytest.mark.asyncio
@@ -19,9 +19,13 @@ async def test_health_check_returns_status_key():
 
     DB and Redis connections are mocked to avoid requiring real services.
     """
-    # Mock DB connection (engine.connect())
+    # Mock DB connection (engine.connect() as async context manager)
     mock_conn = AsyncMock()
     mock_conn.execute = AsyncMock(return_value=None)
+
+    mock_engine = MagicMock()
+    mock_engine.connect = MagicMock(return_value=mock_conn)
+    # connect() returns an async context manager
     mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
     mock_conn.__aexit__ = AsyncMock(return_value=None)
 
@@ -39,11 +43,11 @@ async def test_health_check_returns_status_key():
         return mock_reader, mock_writer
 
     with (
-        patch("app.main.engine.connect", return_value=mock_conn),
+        patch("app.main.engine", mock_engine),
         patch("asyncio.open_connection", side_effect=fake_open_connection),
     ):
         async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
+            transport=ASGITransport(app=_fastapi_app), base_url="http://test"
         ) as client:
             response = await client.get("/health")
 

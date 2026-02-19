@@ -11,7 +11,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.db.session import get_db
-from app.main import app
+from app.main import _fastapi_app
 
 
 # ── Database mock helpers ─────────────────────────────────────────────────────
@@ -56,6 +56,7 @@ def make_project_config(*, project_id: str | None = None) -> MagicMock:
     c.test_timeout = 30000
     c.parallel_workers = 1
     c.retry_count = 0
+    c.browser = None
     c.test_login_email = None
     c.test_login_password = None
     c.ai_provider = None
@@ -136,11 +137,11 @@ async def client(mock_db: MagicMock) -> AsyncGenerator[AsyncClient, None]:
     async def override_get_db() -> AsyncGenerator:
         yield mock_db
 
-    app.dependency_overrides[get_db] = override_get_db
+    _fastapi_app.dependency_overrides[get_db] = override_get_db
 
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=_fastapi_app), base_url="http://test"
     ) as ac:
         yield ac
 
-    app.dependency_overrides.clear()
+    _fastapi_app.dependency_overrides.clear()

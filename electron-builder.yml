@@ -1,0 +1,125 @@
+# electron-builder configuration
+# https://www.electron.build/configuration
+
+appId: com.testforge.ai
+productName: TestForge AI
+copyright: Copyright (c) 2026 TestForge
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - "!**/*.map"
+  - "!**/node_modules/.cache"
+
+extraResources:
+  # Bundled Python backend (PyInstaller or similar output)
+  - from: backend-dist
+    to: backend
+    filter:
+      - "**/*"
+
+# ── Auto-update (electron-updater) ────────────────────────────────────────────
+# Uncomment and configure when publishing releases:
+# publish:
+#   provider: github
+#   owner: your-org
+#   repo: testforge
+#   releaseType: release
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+  icon: build/icon.icns
+  category: public.app-category.developer-tools
+  darkModeSupport: true
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # Uncomment for notarization (requires Apple Developer account):
+  # notarize:
+  #   teamId: YOUR_TEAM_ID
+
+dmg:
+  artifactName: "${productName}-${version}-${arch}.dmg"
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+# ── Windows ───────────────────────────────────────────────────────────────────
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  icon: build/icon.ico
+  # Uncomment for code signing:
+  # certificateFile: path/to/cert.pfx
+  # certificatePassword: ...
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  artifactName: "${productName}-Setup-${version}.exe"
+  shortcutName: TestForge AI
+  uninstallDisplayName: TestForge AI
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
+# ── Linux ─────────────────────────────────────────────────────────────────────
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+  icon: build/icon.png
+  category: Development
+  synopsis: Intelligent E2E Testing Platform
+  description: AI-powered test generation, execution, and analysis for web applications
+  desktop:
+    StartupWMClass: testforge-ai
+    MimeType: x-scheme-handler/testforge
+
+deb:
+  depends:
+    - gconf2
+    - gconf-service
+    - libnotify4
+    - libappindicator1
+    - libxtst6
+    - libnss3
+  artifactName: "${productName}-${version}-${arch}.deb"
+
+appImage:
+  artifactName: "${productName}-${version}-${arch}.AppImage"
+
+# ── Build artifacts ───────────────────────────────────────────────────────────
+artifactName: "${productName}-${version}-${os}-${arch}.${ext}"
+
+# ── asar (archive app source for faster loading) ─────────────────────────────
+asar: true
+asarUnpack:
+  - "**/*.node"
+  - "**/node_modules/sharp/**"

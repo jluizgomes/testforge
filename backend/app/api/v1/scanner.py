@@ -511,12 +511,16 @@ def _build_rich_prompt(
         )
     else:
         type_rules = (
-            "- Use TypeScript + @playwright/test\n"
-            "- FRONTEND_URL = process.env.FRONTEND_URL || '...'\n"
-            "- Generate ONE complete test FILE per source file with 2-3 test functions covering:\n"
-            "    • Page loads (status < 500)\n"
-            "    • Key elements visible (heading, navigation, main content)\n"
-            "    • Basic interaction (click, fill, navigate)\n"
+            "- Use Python + pytest-playwright (NOT TypeScript — the runner is Python/pytest)\n"
+            "- from playwright.sync_api import Page, expect\n"
+            "- FRONTEND_URL = os.environ.get('FRONTEND_URL', '...').rstrip('/')\n"
+            "- Generate ONE complete Python test FILE per source file with 2-3 test functions:\n"
+            "    • def test_X_page_loads(page: Page) — page.goto(), assert response.status < 500\n"
+            "    • def test_X_has_visible_content(page: Page) — expect(locator).to_be_visible()\n"
+            "    • def test_X_interaction(page: Page) — click/fill, navigate, check state\n"
+            "- Screenshots are captured automatically on failure — no extra code needed\n"
+            "- Use sync playwright API only (no async/await)\n"
+            "- IMPORTANT: output Python code, not TypeScript"
         )
     sections.append(
         "IMPORTANT RULES:\n"
@@ -724,31 +728,62 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
             await db.commit()
             await _broadcast_scan_progress(job)
 
-            # ── Incremental: skip unchanged entry points ─────────────────────
+            # ── Incremental: skip unchanged files + protect accepted tests ───
+            # Load all existing GeneratedTests for this project in one query.
             existing_result = await db.execute(
-                select(GeneratedTest.entry_point, GeneratedTest.content_hash)
-                .where(
-                    GeneratedTest.project_id == job.project_id,
-                    GeneratedTest.content_hash.isnot(None),
-                )
+                select(GeneratedTest.entry_point, GeneratedTest.content_hash, GeneratedTest.accepted)
+                .where(GeneratedTest.project_id == job.project_id)
             )
-            existing_hashes = {
-                row.entry_point: row.content_hash
-                for row in existing_result.all()
-            }
-            if existing_hashes:
-                before = len(entry_points)
-                entry_points = [
-                    ep for ep in entry_points
-                    if ep.get("content_hash") != existing_hashes.get(ep.get("path"))
-                ]
-                skipped = before - len(entry_points)
-                if skipped:
-                    logger.info(
-                        "scan: incremental — skipped %d unchanged, %d new/modified",
-                        skipped,
-                        len(entry_points),
+            existing_rows = existing_result.all()
+
+            # entry_point → content_hash (for any existing test, accepted or not)
+            existing_hashes: dict[str, str | None] = {}
+            # set of entry_points that already have at least one accepted test
+            accepted_eps: set[str] = set()
+            for row in existing_rows:
+                ep = row.entry_point
+                if row.content_hash:
+                    existing_hashes[ep] = row.content_hash
+                if row.accepted:
+                    accepted_eps.add(ep)
+
+            changed_eps: list[str] = []  # files that changed (old non-accepted tests need cleanup)
+            before = len(entry_points)
+            filtered: list[dict[str, Any]] = []
+            for ep in entry_points:
+                path = ep.get("path")
+                # Preserve user decisions: never regenerate if there's an accepted test
+                if path in accepted_eps:
+                    continue
+                # Skip if the file content hasn't changed (no new insights to generate from)
+                if ep.get("content_hash") and ep.get("content_hash") == existing_hashes.get(path):
+                    continue
+                filtered.append(ep)
+                # Track files that changed so we can remove stale non-accepted tests
+                if path in existing_hashes:
+                    changed_eps.append(path)
+
+            entry_points = filtered
+            skipped = before - len(entry_points)
+            if skipped:
+                logger.info(
+                    "scan: incremental — skipped %d (unchanged or already accepted), %d new/modified",
+                    skipped,
+                    len(entry_points),
+                )
+
+            # Remove stale non-accepted tests for files that changed content
+            if changed_eps:
+                from sqlalchemy import delete as sa_delete
+                await db.execute(
+                    sa_delete(GeneratedTest).where(
+                        GeneratedTest.project_id == job.project_id,
+                        GeneratedTest.entry_point.in_(changed_eps),
+                        GeneratedTest.accepted == False,  # noqa: E712
                     )
+                )
+                await db.commit()
+                logger.info("scan: cleaned up old non-accepted tests for %d changed files", len(changed_eps))
 
             # ── Phase 2: Generate tests via AI ───────────────────────────────
             job.status = ScanJobStatus.GENERATING
@@ -822,6 +857,10 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                     project_context["test_login_password"] = mask_credential(config.test_login_password)
                 if relevant_endpoints:
                     project_context["openapi_endpoints"] = relevant_endpoints
+                # Tell the AI which entry_points already have accepted tests so it
+                # generates complementary coverage rather than duplicating them.
+                if accepted_eps:
+                    project_context["already_covered_files"] = sorted(accepted_eps)
 
                 if agent:
                     try:
@@ -888,9 +927,20 @@ async def _run_scan(job_id: str, project_path: str, structure: dict[str, Any] | 
                 await db.commit()
                 await _broadcast_scan_progress(job, tests_by_type=tests_by_type)
 
+            # Include pre-existing accepted tests in the final count so the
+            # user sees "N tests available" not just "N tests generated this run".
+            from sqlalchemy import func as sa_func
+            total_accepted = await db.scalar(
+                select(sa_func.count()).select_from(GeneratedTest).where(
+                    GeneratedTest.project_id == job.project_id,
+                    GeneratedTest.accepted == True,  # noqa: E712
+                )
+            ) or 0
+            total_available = generated_count + len(accepted_eps)
+
             job.status = ScanJobStatus.COMPLETED
             job.progress = 100
-            job.tests_generated = generated_count
+            job.tests_generated = total_available
             await db.commit()
             await _broadcast_scan_progress(job, tests_by_type=tests_by_type)
 
@@ -1092,25 +1142,39 @@ async def test_{safe_name}_db_not_found():
         pytest.skip("No testable endpoint found for {safe_name}")
 """
 
-    # e2e / component → TypeScript Playwright
-    return f"""import {{ test, expect }} from '@playwright/test'
+    # e2e / component → Python pytest-playwright (runs in Docker via Python Playwright)
+    # Screenshots are captured automatically by conftest.py on failure.
+    return f"""import os
+import pytest
+from playwright.sync_api import Page, expect
 
-// Auto-generated E2E test for: {path}
+# Auto-generated E2E test for: {path}
+# Uses Python Playwright (pytest-playwright) — no Node.js/npx required.
+# Screenshots are captured on failure by the TestForge conftest fixture.
 
-const FRONTEND_URL = process.env.FRONTEND_URL || '{frontend_url}'
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "{frontend_url}").rstrip("/")
+_PAGE_PATH = "/{slug}"
 
-test.describe('{name}', () => {{
-  test('page loads without server error', async ({{ page }}) => {{
-    const response = await page.goto(FRONTEND_URL + '/{slug}')
-    expect(response?.status()).toBeLessThan(500)
-  }})
 
-  test('page has visible content', async ({{ page }}) => {{
-    await page.goto(FRONTEND_URL + '/{slug}')
-    const body = page.locator('body')
-    await expect(body).not.toBeEmpty()
-  }})
-}})
+def test_{safe_name}_page_loads(page: Page) -> None:
+    \"\"\"The page responds without a server error (HTTP < 500).\"\"\"
+    response = page.goto(FRONTEND_URL + _PAGE_PATH)
+    assert response is not None, "No response from server — is the frontend running?"
+    assert response.status < 500, (
+        f"Page {{FRONTEND_URL}}{{_PAGE_PATH}} returned HTTP {{response.status}}"
+    )
+
+
+def test_{safe_name}_has_visible_content(page: Page) -> None:
+    \"\"\"The page renders visible content after network-idle.\"\"\"
+    page.goto(FRONTEND_URL + _PAGE_PATH)
+    page.wait_for_load_state("networkidle", timeout=15_000)
+    body = page.locator("body")
+    expect(body).to_be_visible()
+    text = body.inner_text()
+    assert len(text.strip()) > 10, (
+        f"Page {{FRONTEND_URL}}{{_PAGE_PATH}} appears empty — body text: {{text[:200]!r}}"
+    )
 """
 
 

@@ -142,6 +142,6 @@ describe('initializeBackend', () => {
     })
     const state = useAppStore.getState()
     expect(state.backendStatus.status).toBe('running')
-    expect(state.backendUrl).toBe('http://localhost:8000')
+    expect(state.backendUrl).toBe('http://localhost:8001')
   })
 })

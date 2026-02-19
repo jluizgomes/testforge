@@ -328,4 +328,5 @@ class ASGICORSWrapper:
         await self.app(scope, receive, send_with_cors)
 
 
-app = ASGICORSWrapper(create_application())
+_fastapi_app = create_application()
+app = ASGICORSWrapper(_fastapi_app)
