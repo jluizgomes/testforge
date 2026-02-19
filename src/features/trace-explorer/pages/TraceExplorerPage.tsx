@@ -35,6 +35,8 @@ interface SpanNode {
   status: 'ok' | 'error'
   startOffset: number
   children?: SpanNode[]
+  /** Original span data for the detail panel */
+  span?: Span
 }
 
 function buildSpanTree(spans: Span[]): SpanNode | null {
@@ -57,6 +59,7 @@ function buildSpanTree(spans: Span[]): SpanNode | null {
       status: span.status === 'ok' ? 'ok' : 'error',
       startOffset: startMs - traceStartMs,
       children: children.length > 0 ? children : undefined,
+      span,
     }
   }
 
@@ -637,8 +640,13 @@ export function TraceExplorerPage() {
             <CardTitle className="text-lg">
               Span Details: {selectedSpan.name}
             </CardTitle>
+            {selectedSpan.span?.span_id && (
+              <CardDescription className="font-mono text-xs">
+                {selectedSpan.span.span_id}
+              </CardDescription>
+            )}
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
             <div className="grid gap-4 md:grid-cols-4">
               <div>
                 <label className="text-sm font-medium text-muted-foreground">
@@ -673,6 +681,68 @@ export function TraceExplorerPage() {
                 </p>
               </div>
             </div>
+
+            {/* Error message */}
+            {selectedSpan.span?.error_message && (
+              <div>
+                <label className="text-sm font-medium text-muted-foreground">
+                  Error
+                </label>
+                <div className="mt-1 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                  <pre className="whitespace-pre-wrap text-sm text-destructive">
+                    {selectedSpan.span.error_message}
+                  </pre>
+                </div>
+              </div>
+            )}
+
+            {/* Attributes */}
+            {selectedSpan.span?.attributes &&
+              Object.keys(selectedSpan.span.attributes).length > 0 && (
+                <div>
+                  <label className="text-sm font-medium text-muted-foreground">
+                    Attributes
+                  </label>
+                  <div className="mt-1 rounded-md border bg-muted/30 p-3">
+                    <div className="space-y-1">
+                      {Object.entries(selectedSpan.span.attributes).map(
+                        ([key, value]) => (
+                          <div
+                            key={key}
+                            className="flex items-start gap-2 text-sm"
+                          >
+                            <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                              {key}:
+                            </span>
+                            <span className="font-mono text-xs break-all">
+                              {typeof value === 'object'
+                                ? JSON.stringify(value)
+                                : String(value)}
+                            </span>
+                          </div>
+                        )
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+            {/* Events */}
+            {selectedSpan.span?.events &&
+              selectedSpan.span.events.length > 0 && (
+                <div>
+                  <label className="text-sm font-medium text-muted-foreground">
+                    Events ({selectedSpan.span.events.length})
+                  </label>
+                  <div className="mt-1 rounded-md border bg-muted/30 p-3">
+                    <ScrollArea className="max-h-48">
+                      <pre className="text-xs">
+                        {JSON.stringify(selectedSpan.span.events, null, 2)}
+                      </pre>
+                    </ScrollArea>
+                  </div>
+                </div>
+              )}
           </CardContent>
         </Card>
       )}

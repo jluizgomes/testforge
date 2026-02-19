@@ -1,5 +1,6 @@
 """Report generator for test results."""
 
+import base64
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -359,7 +360,7 @@ class ReportGenerator:
 
         for result in results:
             if result.get("status") in ["failed", "error"]:
-                failures.append({
+                entry: dict[str, Any] = {
                     "test_name": result.get("test_name"),
                     "test_file": result.get("test_file"),
                     "test_layer": result.get("test_layer"),
@@ -368,7 +369,19 @@ class ReportGenerator:
                     "screenshot_path": result.get("screenshot_path"),
                     "trace_id": result.get("trace_id"),
                     "duration_ms": result.get("duration_ms"),
-                })
+                }
+                # Embed screenshot as base64 for HTML/PDF reports
+                ss_path = result.get("screenshot_path")
+                if ss_path:
+                    ss_file = Path("screenshots") / Path(ss_path).name
+                    if ss_file.exists():
+                        try:
+                            entry["screenshot_b64"] = base64.b64encode(
+                                ss_file.read_bytes()
+                            ).decode()
+                        except Exception:
+                            pass
+                failures.append(entry)
 
         return failures
 

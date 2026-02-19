@@ -241,6 +241,46 @@
     .rec-icon { font-size: 1rem; flex-shrink: 0; margin-top: 0.05rem; }
     .rec-text { font-size: 0.85rem; color: #334155; }
 
+    /* ── Screenshots ── */
+    .screenshot-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 1rem;
+    }
+    .screenshot-card {
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #f8fafc;
+    }
+    .screenshot-card img {
+      width: 100%;
+      height: auto;
+      display: block;
+      cursor: pointer;
+    }
+    .screenshot-card .caption {
+      padding: 0.5rem 0.75rem;
+      font-size: 0.75rem;
+      color: #475569;
+      border-top: 1px solid #e2e8f0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .screenshot-inline {
+      margin-top: 0.75rem;
+      border-radius: 6px;
+      overflow: hidden;
+      border: 1px solid #e2e8f0;
+    }
+    .screenshot-inline img {
+      width: 100%;
+      max-height: 300px;
+      object-fit: contain;
+      background: #f1f5f9;
+    }
+
     /* ── Footer ── */
     .footer {
       margin-top: 2rem;
@@ -406,8 +446,32 @@
 
 {{ f.error_stack }}{% endif %}</div>
       {% endif %}
+      {% if f.screenshot_b64 %}
+      <div class="screenshot-inline">
+        <img src="data:image/png;base64,{{ f.screenshot_b64 }}" alt="Screenshot: {{ f.test_name }}" />
+      </div>
+      {% endif %}
     </div>
     {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- ═══════════════ SCREENSHOTS ═══════════════ -->
+  {% set screenshots = failures | selectattr("screenshot_b64", "defined") | selectattr("screenshot_b64") | list %}
+  {% if screenshots %}
+  <div class="section">
+    <div class="section-title">
+      Screenshots
+      <span class="count">{{ screenshots | length }}</span>
+    </div>
+    <div class="screenshot-grid">
+      {% for s in screenshots %}
+      <div class="screenshot-card">
+        <img src="data:image/png;base64,{{ s.screenshot_b64 }}" alt="{{ s.test_name }}" />
+        <div class="caption">{{ s.test_name }}</div>
+      </div>
+      {% endfor %}
+    </div>
   </div>
   {% endif %}
 

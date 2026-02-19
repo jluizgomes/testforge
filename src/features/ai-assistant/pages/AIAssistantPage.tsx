@@ -20,10 +20,84 @@ import {
   FileText,
   Loader2,
   AlertCircle,
+  Copy,
+  Check,
+  Trash2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { apiClient } from '@/services/api-client'
 import { useAppStore } from '@/stores/app-store'
+
+// ── Markdown-lite renderer ──────────────────────────────────────────────────
+
+/** Split message content into text and fenced code blocks. */
+function parseMessageBlocks(content: string): Array<{ type: 'text' | 'code'; lang?: string; value: string }> {
+  const blocks: Array<{ type: 'text' | 'code'; lang?: string; value: string }> = []
+  const fenceRe = /^```(\w*)\n?([\s\S]*?)^```/gm
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+
+  while ((match = fenceRe.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      blocks.push({ type: 'text', value: content.slice(lastIndex, match.index) })
+    }
+    blocks.push({ type: 'code', lang: match[1] || undefined, value: match[2].replace(/\n$/, '') })
+    lastIndex = match.index + match[0].length
+  }
+
+  if (lastIndex < content.length) {
+    blocks.push({ type: 'text', value: content.slice(lastIndex) })
+  }
+
+  return blocks.length ? blocks : [{ type: 'text', value: content }]
+}
+
+function CodeBlock({ lang, value }: { lang?: string; value: string }) {
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(value)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  return (
+    <div className="group relative my-2 rounded-md bg-zinc-950 border border-zinc-800">
+      <div className="flex items-center justify-between px-3 py-1.5 border-b border-zinc-800">
+        <span className="text-[10px] font-medium text-zinc-500 uppercase">{lang || 'code'}</span>
+        <button
+          onClick={handleCopy}
+          className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
+        >
+          {copied ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      <pre className="p-3 overflow-x-auto text-xs text-zinc-300 leading-relaxed">
+        <code>{value}</code>
+      </pre>
+    </div>
+  )
+}
+
+function MessageContent({ content, isUser }: { content: string; isUser: boolean }) {
+  if (isUser) {
+    return <p className="whitespace-pre-wrap text-sm">{content}</p>
+  }
+
+  const blocks = parseMessageBlocks(content)
+  return (
+    <div className="text-sm space-y-1">
+      {blocks.map((block, i) =>
+        block.type === 'code' ? (
+          <CodeBlock key={i} lang={block.lang} value={block.value} />
+        ) : (
+          <p key={i} className="whitespace-pre-wrap">{block.value}</p>
+        )
+      )}
+    </div>
+  )
+}
 
 interface Message {
   id: string
@@ -263,9 +337,7 @@ export function AIAssistantPage() {
                           : 'bg-primary text-primary-foreground'
                       )}
                     >
-                      <p className="whitespace-pre-wrap text-sm">
-                        {message.content}
-                      </p>
+                      <MessageContent content={message.content} isUser={message.role === 'user'} />
                       <span className="mt-1 block text-xs opacity-50">
                         {message.timestamp.toLocaleTimeString()}
                       </span>

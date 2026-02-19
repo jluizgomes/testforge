@@ -24,6 +24,7 @@ import {
   FileCode,
   Loader2,
   Check,
+  Upload,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { apiClient } from '@/services/api-client'
@@ -124,6 +125,8 @@ export function TestEditorPage() {
   const [activeTabId, setActiveTabId] = useState(tabs[0].id)
   const [isGenerating, setIsGenerating] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
 
   const activeTab = tabs.find(t => t.id === activeTabId) ?? tabs[0]
 
@@ -209,6 +212,24 @@ export function TestEditorPage() {
     URL.revokeObjectURL(url)
   }
 
+  // ── Save to workspace ───────────────────────────────────────────────────
+
+  const handleSaveToWorkspace = async () => {
+    if (!currentProject || isSaving) return
+    setIsSaving(true)
+    try {
+      const filePath = `tests/${activeTab.name}`
+      await apiClient.putWorkspaceFile(currentProject.id, filePath, activeTab.content)
+      setSaved(true)
+      setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, isDirty: false } : t))
+      setTimeout(() => setSaved(false), 2000)
+    } catch {
+      // ignore
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -282,7 +303,25 @@ export function TestEditorPage() {
             {/* Download */}
             <Button variant="outline" size="sm" onClick={handleDownload}>
               <Download className="mr-1.5 h-3.5 w-3.5" />
-              Save
+              Download
+            </Button>
+
+            {/* Save to workspace */}
+            <Button
+              variant="default"
+              size="sm"
+              disabled={!currentProject || isSaving}
+              onClick={handleSaveToWorkspace}
+              title={!currentProject ? 'Select a project first' : 'Save to project workspace'}
+            >
+              {isSaving ? (
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              ) : saved ? (
+                <Check className="mr-1.5 h-3.5 w-3.5 text-green-500" />
+              ) : (
+                <Upload className="mr-1.5 h-3.5 w-3.5" />
+              )}
+              {saved ? 'Saved!' : 'Save to Project'}
             </Button>
           </div>
         </CardHeader>
